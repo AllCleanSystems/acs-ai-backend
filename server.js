@@ -11,20 +11,24 @@ const port = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-async function getZohoAccessToken() {
-  const params = new URLSearchParams({
-    refresh_token: process.env.ZOHO_REFRESH_TOKEN || "",
-    client_id: process.env.ZOHO_CLIENT_ID || "",
-    client_secret: process.env.ZOHO_CLIENT_SECRET || "",
-    grant_type: "refresh_token"
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    service: "acs-ai-backend",
+    status: "running"
   });
+});
+
+async function getZohoAccessToken() {
+  const params = new URLSearchParams();
+  params.append("refresh_token", process.env.ZOHO_REFRESH_TOKEN || "");
+  params.append("client_id", process.env.ZOHO_CLIENT_ID || "");
+  params.append("client_secret", process.env.ZOHO_CLIENT_SECRET || "");
+  params.append("grant_type", "refresh_token");
 
   const response = await fetch("https://accounts.zoho.com/oauth/v2/token", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body: params.toString()
+    body: params
   });
 
   const data = await response.json();
@@ -79,14 +83,6 @@ async function createZohoAiIntakeRecord(payload) {
 
   return data;
 }
-
-app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    service: "acs-ai-backend",
-    status: "running"
-  });
-});
 
 app.post("/api/ai/create-intake", async (req, res) => {
   try {
@@ -147,7 +143,8 @@ app.post("/api/ai/create-intake", async (req, res) => {
     console.error("create-intake error:", error);
     return res.status(500).json({
       ok: false,
-      error: "Server error."
+      error: "Server error.",
+      details: error.message
     });
   }
 });
