@@ -20,15 +20,15 @@ app.get("/", (req, res) => {
 });
 
 async function getZohoAccessToken() {
-  const params = new URLSearchParams();
-  params.append("refresh_token", process.env.ZOHO_REFRESH_TOKEN || "");
-  params.append("client_id", process.env.ZOHO_CLIENT_ID || "");
-  params.append("client_secret", process.env.ZOHO_CLIENT_SECRET || "");
-  params.append("grant_type", "refresh_token");
+  const tokenUrl =
+    "https://accounts.zoho.com/oauth/v2/token" +
+    `?client_id=${encodeURIComponent(process.env.ZOHO_CLIENT_ID || "")}` +
+    `&grant_type=refresh_token` +
+    `&client_secret=${encodeURIComponent(process.env.ZOHO_CLIENT_SECRET || "")}` +
+    `&refresh_token=${encodeURIComponent(process.env.ZOHO_REFRESH_TOKEN || "")}`;
 
-  const response = await fetch("https://accounts.zoho.com/oauth/v2/token", {
-    method: "POST",
-    body: params
+  const response = await fetch(tokenUrl, {
+    method: "POST"
   });
 
   const data = await response.json();
