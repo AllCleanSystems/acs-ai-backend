@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const fetch = require("node-fetch");
+const { mapServiceType, mapUrgency } = require("./zohoMappings");
 
 dotenv.config();
 
@@ -178,6 +179,10 @@ app.post("/api/ai/create-intake", async (req, res) => {
       ai_confidence,
       chat_session_id
     } = req.body;
+    const normalizedServiceType = mapServiceType(service_type);
+const normalizedUrgency = mapUrgency(urgency);
+
+    
 
     if (!channel || !customer_name || !service_type || !urgency || !request_summary) {
       return res.status(400).json({
@@ -192,8 +197,8 @@ app.post("/api/ai/create-intake", async (req, res) => {
       phone,
       email,
       address,
-      service_type,
-      urgency,
+      service_type: normalizedServiceType,
+      urgency: normalizedUrgency,
       request_summary,
       intent,
       ai_confidence,
