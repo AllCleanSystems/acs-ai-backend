@@ -23,7 +23,7 @@ async function getZohoAccessToken() {
   const tokenUrl =
     "https://accounts.zoho.com/oauth/v2/token" +
     `?client_id=${encodeURIComponent(process.env.ZOHO_CLIENT_ID || "")}` +
-    `&grant_type=refresh_token` +
+    "&grant_type=refresh_token" +
     `&client_secret=${encodeURIComponent(process.env.ZOHO_CLIENT_SECRET || "")}` +
     `&refresh_token=${encodeURIComponent(process.env.ZOHO_REFRESH_TOKEN || "")}`;
 
@@ -47,7 +47,7 @@ async function createZohoAiIntakeRecord(payload) {
   const appLink = process.env.ZOHO_CREATOR_APP_LINK;
   const formLink = "AI_Intake_Log";
 
-  const url = `https://creator.zoho.com/api/v2/${owner}/${appLink}/form/${formLink}`;
+  const url = `https://www.zohoapis.com/creator/v2.1/data/${owner}/${appLink}/form/${formLink}`;
 
   const body = {
     data: {
@@ -60,7 +60,7 @@ async function createZohoAiIntakeRecord(payload) {
       Urgency: payload.urgency,
       Request_Summary: payload.request_summary,
       Intent: payload.intent || "",
-      AI_Confidence: payload.ai_confidence || null,
+      AI_Confidence: payload.ai_confidence ?? null,
       Chat_Session_ID: payload.chat_session_id || "",
       AI_Status: "New"
     }
@@ -124,20 +124,7 @@ app.post("/api/ai/create-intake", async (req, res) => {
     return res.json({
       ok: true,
       message: "AI intake received and sent to Zoho Creator.",
-      zoho: zohoResult,
-      intake: {
-        channel,
-        customer_name,
-        phone: phone || "",
-        email: email || "",
-        address: address || "",
-        service_type,
-        urgency,
-        request_summary,
-        intent: intent || "",
-        ai_confidence: ai_confidence || null,
-        chat_session_id: chat_session_id || ""
-      }
+      zoho: zohoResult
     });
   } catch (error) {
     console.error("create-intake error:", error);
