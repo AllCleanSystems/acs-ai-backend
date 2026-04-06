@@ -44,19 +44,23 @@ function delay(ms) {
 }
 
 function isRetryableStatus(status) {
-  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+  return [408, 429, 500, 502, 503, 504].includes(status);
 }
 
 function isRetryableNetworkError(error) {
   const code = error && error.code ? String(error.code) : "";
   const message = error && error.message ? String(error.message).toLowerCase() : "";
-  return code === "ETIMEDOUT" || code === "ECONNRESET" || code === "EAI_AGAIN" || message.includes("timeout") || message.includes("network");
+  return (
+    code === "ETIMEDOUT" ||
+    code === "ECONNRESET" ||
+    code === "EAI_AGAIN" ||
+    message.includes("timeout") ||
+    message.includes("network")
+  );
 }
 
 function normalizeText(value) {
-  if (!value) {
-    return "";
-  }
+  if (!value) return "";
   return String(value).trim().toLowerCase();
 }
 
@@ -73,18 +77,18 @@ function mapUrgency(value) {
 function buildSystemPrompt() {
   return [
     "You are the ACS website intake assistant.",
-    "Collect intake details for a service request.",
+    "Collect details for a service intake.",
     "Required before creating intake:",
     "- customer_name",
     "- service_type",
     "- urgency",
     "- request_summary",
-    "- at least one contact: phone or email",
+    "- at least one contact method (phone or email)",
     "Rules:",
     "- Keep responses concise and friendly.",
-    "- Ask short follow-up questions only when needed.",
+    "- Ask short follow-up questions only when required.",
     "- Do not promise pricing or appointment times.",
-    "- When ready, call create_ai_intake."
+    "- When required fields are present, call create_ai_intake."
   ].join("\n");
 }
 
@@ -114,13 +118,9 @@ function createIntakeToolSchema() {
 }
 
 function extractFunctionCall(response) {
-  if (!response || !Array.isArray(response.output)) {
-    return null;
-  }
+  if (!response || !Array.isArray(response.output)) return null;
   for (const item of response.output) {
-    if (item.type === "function_call" && item.name === "create_ai_intake") {
-      return item;
-    }
+    if (item.type === "function_call" && item.name === "create_ai_intake") return item;
   }
   return null;
 }
@@ -129,17 +129,15 @@ function responseText(response) {
   if (response && typeof response.output_text === "string" && response.output_text.trim() !== "") {
     return response.output_text;
   }
-  return "Thanks. I can help with that. Can you share your name and best contact info?";
+  return "Thanks. I can help with that. Please share your name and best contact info.";
 }
 
 async function safeJson(response) {
   const text = await response.text();
-  if (!text) {
-    return {};
-  }
+  if (!text) return {};
   try {
     return JSON.parse(text);
-  } catch (error) {
+  } catch {
     return { raw: text };
   }
 }
@@ -186,21 +184,20 @@ async function getZohoAccessToken() {
     grant_type: "refresh_token"
   });
 
-  const tokenUrl = "https://accounts.zoho.com/oauth/v2/token";
-  const response = await fetchWithRetry(tokenUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded"
+  const response = await fetchWithRetry(
+    "https://accounts.zoho.com/oauth/v2/token",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params.toString()
     },
-    body: params.toString()
-  }, "zoho-token");
+    "zoho-token"
+  );
 
   const data = await safeJson(response);
-
   if (!response.ok || !data.access_token) {
     throw new Error(`Zoho token error: ${JSON.stringify(data)}`);
   }
-
   return data.access_token;
 }
 
@@ -210,7 +207,6 @@ async function createZohoAiIntakeRecord(payload) {
   const owner = process.env.ZOHO_CREATOR_OWNER;
   const appLink = process.env.ZOHO_CREATOR_APP_LINK;
   const formLink = "AI_Intake_Log";
-
   const url = `https://www.zohoapis.com/creator/v2.1/data/${owner}/${appLink}/form/${formLink}`;
 
   const dataPayload = {
@@ -222,10 +218,14 @@ async function createZohoAiIntakeRecord(payload) {
     Urgency: payload.urgency,
     Request_Summary: payload.request_summary,
     Intent: payload.intent || "",
-    AI_Confidence: payload.ai_confidence ?? null,
     Chat_Session_ID: payload.chat_session_id || "",
     AI_Status: "New"
   };
+
+  const conf = Number(payload.ai_confidence);
+  if (!Number.isNaN(conf)) {
+    dataPayload.AI_Confidence = conf;
+  }
 
   if (payload.address) {
     dataPayload.Address = {
@@ -238,21 +238,20 @@ async function createZohoAiIntakeRecord(payload) {
     };
   }
 
-  const body = {
-    data: dataPayload
-  };
-
-  const response = await fetchWithRetry(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Zoho-oauthtoken ${accessToken}`,
-      "Content-Type": "application/json"
+  const response = await fetchWithRetry(
+    url,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Zoho-oauthtoken ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ data: dataPayload })
     },
-    body: JSON.stringify(body)
-  }, "zoho-creator-create");
+    "zoho-creator-create"
+  );
 
   const data = await safeJson(response);
-
   if (!response.ok || (data.code && data.code !== 3000)) {
     throw new Error(`Zoho Creator create record error: ${JSON.stringify(data)}`);
   }
@@ -261,11 +260,7 @@ async function createZohoAiIntakeRecord(payload) {
 }
 
 app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    service: "acs-ai-backend",
-    status: "running"
-  });
+  res.json({ ok: true, service: "acs-ai-backend", status: "running" });
 });
 
 app.post("/api/ai/create-intake", async (req, res) => {
@@ -285,43 +280,30 @@ app.post("/api/ai/create-intake", async (req, res) => {
     } = req.body;
 
     if (!channel || !customer_name || !service_type || !urgency || !request_summary) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing required intake fields."
-      });
+      return res.status(400).json({ ok: false, error: "Missing required intake fields." });
     }
 
-    const zohoResult = await createZohoAiIntakeRecord({
+    const normalizedPayload = {
       channel,
       customer_name,
-      phone,
-      email,
-      address,
-      service_type,
-      urgency,
+      phone: phone || "",
+      email: email || "",
+      address: address || "",
+      service_type: mapServiceType(service_type),
+      urgency: mapUrgency(urgency),
       request_summary,
-      intent,
+      intent: intent || "",
       ai_confidence,
-      chat_session_id
-    });
+      chat_session_id: chat_session_id || ""
+    };
+
+    const zohoResult = await createZohoAiIntakeRecord(normalizedPayload);
 
     return res.json({
       ok: true,
       message: "AI intake received and sent to Zoho Creator.",
       zoho: zohoResult,
-      intake: {
-        channel,
-        customer_name,
-        phone: phone || "",
-        email: email || "",
-        address: address || "",
-        service_type,
-        urgency,
-        request_summary,
-        intent: intent || "",
-        ai_confidence: ai_confidence || null,
-        chat_session_id: chat_session_id || ""
-      }
+      intake: normalizedPayload
     });
   } catch (error) {
     console.error("create-intake error:", error);
@@ -336,20 +318,14 @@ app.post("/api/ai/create-intake", async (req, res) => {
 app.post("/api/ai/chat", async (req, res) => {
   try {
     if (!openai) {
-      return res.status(500).json({
-        ok: false,
-        error: "OPENAI_API_KEY is not configured."
-      });
+      return res.status(500).json({ ok: false, error: "OPENAI_API_KEY is not configured." });
     }
 
     const userMessage = (req.body.message || "").toString().trim();
     const chatSessionId = (req.body.chat_session_id || "").toString().trim();
 
     if (userMessage === "") {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing message."
-      });
+      return res.status(400).json({ ok: false, error: "Missing message." });
     }
 
     const first = await openai.responses.create({
@@ -375,9 +351,11 @@ app.post("/api/ai/chat", async (req, res) => {
     let args = {};
     try {
       args = JSON.parse(toolCall.arguments || "{}");
-    } catch (error) {
+    } catch {
       args = {};
     }
+
+    const parsedConfidence = Number(args.ai_confidence);
 
     const normalizedPayload = {
       channel: "Website Chat",
@@ -389,7 +367,7 @@ app.post("/api/ai/chat", async (req, res) => {
       urgency: mapUrgency(args.urgency),
       request_summary: (args.request_summary || "").toString(),
       intent: (args.intent || "").toString(),
-      ai_confidence: args.ai_confidence ?? null,
+      ai_confidence: Number.isNaN(parsedConfidence) ? undefined : parsedConfidence,
       chat_session_id: chatSessionId || (args.chat_session_id || "").toString()
     };
 
@@ -402,11 +380,7 @@ app.post("/api/ai/chat", async (req, res) => {
         {
           type: "function_call_output",
           call_id: toolCall.call_id,
-          output: JSON.stringify({
-            ok: true,
-            message: "Intake created.",
-            zoho: zohoResult
-          })
+          output: JSON.stringify({ ok: true, message: "Intake created.", zoho: zohoResult })
         }
       ]
     });
