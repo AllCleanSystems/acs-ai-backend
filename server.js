@@ -222,11 +222,6 @@ async function createZohoAiIntakeRecord(payload) {
     AI_Status: "New"
   };
 
-  const conf = Number(payload.ai_confidence);
-  if (!Number.isNaN(conf)) {
-    dataPayload.AI_Confidence = conf;
-  }
-
   if (payload.address) {
     dataPayload.Address = {
       address_line_1: payload.address,
