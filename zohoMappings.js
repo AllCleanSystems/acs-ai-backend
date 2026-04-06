@@ -1,12 +1,25 @@
 const SERVICE_TYPE_MAP = {
   "carpet cleaning": "Carpet Cleaning",
   "carpet clean": "Carpet Cleaning",
-  "house wash": "House Wash",
-  "pressure washing": "Pressure Washing",
-  "roof cleaning": "Roof Cleaning",
+
   "window cleaning": "Window Cleaning",
-  "gutter cleaning": "Gutter Cleaning",
-  "commercial cleaning": "Commercial Cleaning"
+
+  "commercial cleaning": "Commercial Cleaning",
+
+  "lawn maintenance": "Lawn Maintenance",
+  "lawn maintenace": "Lawn Maintenance",
+  "lawn service": "Lawn Maintenance",
+
+  "snow removal": "Snow Removal",
+  "snow": "Snow Removal",
+
+  "food truck cleaning": "Food Truck Cleaning",
+  "truck cleaning": "Food Truck Cleaning",
+
+  "hood cleaning": "Hood Cleaning",
+  "kitchen hood cleaning": "Hood Cleaning",
+
+  "other": "Other"
 };
 
 const URGENCY_MAP = {
@@ -23,7 +36,7 @@ function normalizeText(value) {
 
 function mapServiceType(inputValue) {
   const key = normalizeText(inputValue);
-  return SERVICE_TYPE_MAP[key] || inputValue;
+  return SERVICE_TYPE_MAP[key] || "Other";
 }
 
 function mapUrgency(inputValue) {
