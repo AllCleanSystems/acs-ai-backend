@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const fetch = require("node-fetch");
-const { mapServiceType, mapUrgency } = require("./zohoMappings");
+const OpenAI = require("openai");
 
 dotenv.config();
 
@@ -10,9 +10,34 @@ const app = express();
 const port = process.env.PORT || 3001;
 const REQUEST_TIMEOUT_MS = 15000;
 const RETRY_DELAY_MS = 1200;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 
 app.use(cors());
 app.use(express.json());
+
+const openai = process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  : null;
+
+const SERVICE_TYPE_MAP = {
+  "carpet cleaning": "Carpet Cleaning",
+  "carpet clean": "Carpet Cleaning",
+  "window cleaning": "Window Cleaning",
+  "commercial cleaning": "Commercial Cleaning",
+  "lawn maintenance": "Lawn Maintenance",
+  "lawn maintenace": "Lawn Maintenance",
+  "snow removal": "Snow Removal",
+  "food truck cleaning": "Food Truck Cleaning",
+  "hood cleaning": "Hood Cleaning",
+  other: "Other"
+};
+
+const URGENCY_MAP = {
+  emergency: "Emergency",
+  high: "High",
+  normal: "Normal",
+  low: "Low"
+};
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -26,6 +51,85 @@ function isRetryableNetworkError(error) {
   const code = error && error.code ? String(error.code) : "";
   const message = error && error.message ? String(error.message).toLowerCase() : "";
   return code === "ETIMEDOUT" || code === "ECONNRESET" || code === "EAI_AGAIN" || message.includes("timeout") || message.includes("network");
+}
+
+function normalizeText(value) {
+  if (!value) {
+    return "";
+  }
+  return String(value).trim().toLowerCase();
+}
+
+function mapServiceType(value) {
+  const key = normalizeText(value);
+  return SERVICE_TYPE_MAP[key] || "Other";
+}
+
+function mapUrgency(value) {
+  const key = normalizeText(value);
+  return URGENCY_MAP[key] || "Normal";
+}
+
+function buildSystemPrompt() {
+  return [
+    "You are the ACS website intake assistant.",
+    "Collect intake details for a service request.",
+    "Required before creating intake:",
+    "- customer_name",
+    "- service_type",
+    "- urgency",
+    "- request_summary",
+    "- at least one contact: phone or email",
+    "Rules:",
+    "- Keep responses concise and friendly.",
+    "- Ask short follow-up questions only when needed.",
+    "- Do not promise pricing or appointment times.",
+    "- When ready, call create_ai_intake."
+  ].join("\n");
+}
+
+function createIntakeToolSchema() {
+  return {
+    type: "function",
+    name: "create_ai_intake",
+    description: "Create an AI intake record in Zoho Creator.",
+    parameters: {
+      type: "object",
+      properties: {
+        channel: { type: "string", enum: ["Website Chat"] },
+        customer_name: { type: "string" },
+        phone: { type: "string" },
+        email: { type: "string" },
+        address: { type: "string" },
+        service_type: { type: "string" },
+        urgency: { type: "string", enum: ["Emergency", "High", "Normal", "Low"] },
+        request_summary: { type: "string" },
+        intent: { type: "string" },
+        ai_confidence: { type: "number" },
+        chat_session_id: { type: "string" }
+      },
+      required: ["channel", "customer_name", "service_type", "urgency", "request_summary"]
+    }
+  };
+}
+
+function extractFunctionCall(response) {
+  if (!response || !Array.isArray(response.output)) {
+    return null;
+  }
+  for (const item of response.output) {
+    if (item.type === "function_call" && item.name === "create_ai_intake") {
+      return item;
+    }
+  }
+  return null;
+}
+
+function responseText(response) {
+  if (response && typeof response.output_text === "string" && response.output_text.trim() !== "") {
+    return response.output_text;
+  }
+  return "Thanks. I can help with that. Can you share your name and best contact info?";
 }
 
 async function safeJson(response) {
@@ -179,10 +283,6 @@ app.post("/api/ai/create-intake", async (req, res) => {
       ai_confidence,
       chat_session_id
     } = req.body;
-    const normalizedServiceType = mapServiceType(service_type);
-const normalizedUrgency = mapUrgency(urgency);
-
-    
 
     if (!channel || !customer_name || !service_type || !urgency || !request_summary) {
       return res.status(400).json({
@@ -197,8 +297,8 @@ const normalizedUrgency = mapUrgency(urgency);
       phone,
       email,
       address,
-      service_type: normalizedServiceType,
-      urgency: normalizedUrgency,
+      service_type,
+      urgency,
       request_summary,
       intent,
       ai_confidence,
@@ -228,6 +328,101 @@ const normalizedUrgency = mapUrgency(urgency);
     return res.status(500).json({
       ok: false,
       error: "Server error.",
+      details: error.message
+    });
+  }
+});
+
+app.post("/api/ai/chat", async (req, res) => {
+  try {
+    if (!openai) {
+      return res.status(500).json({
+        ok: false,
+        error: "OPENAI_API_KEY is not configured."
+      });
+    }
+
+    const userMessage = (req.body.message || "").toString().trim();
+    const chatSessionId = (req.body.chat_session_id || "").toString().trim();
+
+    if (userMessage === "") {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing message."
+      });
+    }
+
+    const first = await openai.responses.create({
+      model: OPENAI_MODEL,
+      input: [
+        { role: "system", content: buildSystemPrompt() },
+        { role: "user", content: userMessage }
+      ],
+      tools: [createIntakeToolSchema()],
+      tool_choice: "auto"
+    });
+
+    const toolCall = extractFunctionCall(first);
+
+    if (!toolCall) {
+      return res.json({
+        ok: true,
+        intake_created: false,
+        reply: responseText(first)
+      });
+    }
+
+    let args = {};
+    try {
+      args = JSON.parse(toolCall.arguments || "{}");
+    } catch (error) {
+      args = {};
+    }
+
+    const normalizedPayload = {
+      channel: "Website Chat",
+      customer_name: (args.customer_name || "").toString(),
+      phone: (args.phone || "").toString(),
+      email: (args.email || "").toString(),
+      address: (args.address || "").toString(),
+      service_type: mapServiceType(args.service_type),
+      urgency: mapUrgency(args.urgency),
+      request_summary: (args.request_summary || "").toString(),
+      intent: (args.intent || "").toString(),
+      ai_confidence: args.ai_confidence ?? null,
+      chat_session_id: chatSessionId || (args.chat_session_id || "").toString()
+    };
+
+    const zohoResult = await createZohoAiIntakeRecord(normalizedPayload);
+
+    const second = await openai.responses.create({
+      model: OPENAI_MODEL,
+      previous_response_id: first.id,
+      input: [
+        {
+          type: "function_call_output",
+          call_id: toolCall.call_id,
+          output: JSON.stringify({
+            ok: true,
+            message: "Intake created.",
+            zoho: zohoResult
+          })
+        }
+      ]
+    });
+
+    return res.json({
+      ok: true,
+      intake_created: true,
+      reply: responseText(second),
+      intake_payload: normalizedPayload,
+      zoho: zohoResult
+    });
+  } catch (error) {
+    console.error("ai-chat error:", error);
+    return res.status(500).json({
+      ok: false,
+      error: "AI chat server error.",
       details: error.message
     });
   }
