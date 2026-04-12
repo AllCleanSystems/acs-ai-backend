@@ -1,3 +1,4 @@
+// server.js
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
@@ -13,13 +14,43 @@ const RETRY_DELAY_MS = 1200;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 
 app.use(cors());
+// Twilio sends webhooks as application/x-www-form-urlencoded
+app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
 
+// In-memory SMS sessions (best-effort). If Railway restarts, sessions reset.
+// Keyed by "sms_<FromPhoneNumber>".
+const smsSessions = new Map();
+const SMS_SESSION_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
+
+function getSmsSession(sessionId) {
+  const now = Date.now();
+  const existing = smsSessions.get(sessionId);
+  if (existing && now - existing.lastSeen < SMS_SESSION_TTL_MS) {
+    existing.lastSeen = now;
+    return existing;
+  }
+  const fresh = { lastSeen: now, history: [], intakeCreated: false };
+  smsSessions.set(sessionId, fresh);
+  return fresh;
+}
+
+function cleanupSmsSessions() {
+  const now = Date.now();
+  for (const [key, value] of smsSessions.entries()) {
+    if (!value || now - (value.lastSeen || 0) > SMS_SESSION_TTL_MS) {
+      smsSessions.delete(key);
+    }
+  }
+}
+setInterval(cleanupSmsSessions, 1000 * 60 * 30).unref();
+
 const SERVICE_TYPE_MAP = {
+  "restaurant hood cleaning": "Hood Cleaning",
   "carpet cleaning": "Carpet Cleaning",
   "carpet clean": "Carpet Cleaning",
   "window cleaning": "Window Cleaning",
@@ -44,12 +75,20 @@ function delay(ms) {
 }
 
 function isRetryableStatus(status) {
-  return [408, 429, 500, 502, 503, 504].includes(status);
+  return (
+    status === 408 ||
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  );
 }
 
 function isRetryableNetworkError(error) {
   const code = error && error.code ? String(error.code) : "";
-  const message = error && error.message ? String(error.message).toLowerCase() : "";
+  const message =
+    error && error.message ? String(error.message).toLowerCase() : "";
   return (
     code === "ETIMEDOUT" ||
     code === "ECONNRESET" ||
@@ -60,7 +99,9 @@ function isRetryableNetworkError(error) {
 }
 
 function normalizeText(value) {
-  if (!value) return "";
+  if (!value) {
+    return "";
+  }
   return String(value).trim().toLowerCase();
 }
 
@@ -77,19 +118,44 @@ function mapUrgency(value) {
 function buildSystemPrompt() {
   return [
     "You are the ACS website intake assistant.",
-    "Collect details for a service intake.",
+    "Collect intake details for a service request.",
     "Required before creating intake:",
     "- customer_name",
     "- service_type",
     "- urgency",
     "- request_summary",
-    "- at least one contact method (phone or email)",
+    "- at least one contact: phone or email",
     "Rules:",
     "- Keep responses concise and friendly.",
-    "- Ask short follow-up questions only when required.",
+    "- Ask short follow-up questions only when needed.",
     "- Do not promise pricing or appointment times.",
-    "- When required fields are present, call create_ai_intake."
+    "- When ready, call create_ai_intake."
   ].join("\n");
+}
+
+function buildPhoneSystemPrompt() {
+  return [
+    "You are ACS's live phone receptionist. Sound warm, calm, and human.",
+    "Goal: collect details for a service intake and submit it.",
+    "Required before creating intake:",
+    "- customer_name",
+    "- service_type",
+    "- urgency",
+    "- request_summary",
+    "- at least one contact: phone or email",
+    "Style rules:",
+    "- Ask one question at a time.",
+    "- Use short sentences and friendly confirmations.",
+    "- Acknowledge stress before asking the next question.",
+    "- Do not promise pricing or appointment times.",
+    "When required fields are present, call create_ai_intake."
+  ].join("\n");
+}
+
+function normalizeChannel(value) {
+  const v = normalizeText(value);
+  if (v === "phone") return "Phone";
+  return "Website Chat";
 }
 
 function createIntakeToolSchema() {
@@ -100,7 +166,7 @@ function createIntakeToolSchema() {
     parameters: {
       type: "object",
       properties: {
-        channel: { type: "string", enum: ["Website Chat"] },
+        channel: { type: "string", enum: ["Website Chat", "Phone"] },
         customer_name: { type: "string" },
         phone: { type: "string" },
         email: { type: "string" },
@@ -109,7 +175,6 @@ function createIntakeToolSchema() {
         urgency: { type: "string", enum: ["Emergency", "High", "Normal", "Low"] },
         request_summary: { type: "string" },
         intent: { type: "string" },
-        ai_confidence: { type: "number" },
         chat_session_id: { type: "string" }
       },
       required: ["channel", "customer_name", "service_type", "urgency", "request_summary"]
@@ -118,26 +183,55 @@ function createIntakeToolSchema() {
 }
 
 function extractFunctionCall(response) {
-  if (!response || !Array.isArray(response.output)) return null;
+  if (!response || !Array.isArray(response.output)) {
+    return null;
+  }
   for (const item of response.output) {
-    if (item.type === "function_call" && item.name === "create_ai_intake") return item;
+    if (item.type === "function_call" && item.name === "create_ai_intake") {
+      return item;
+    }
   }
   return null;
 }
 
 function responseText(response) {
-  if (response && typeof response.output_text === "string" && response.output_text.trim() !== "") {
+  if (
+    response &&
+    typeof response.output_text === "string" &&
+    response.output_text.trim() !== ""
+  ) {
     return response.output_text;
   }
-  return "Thanks. I can help with that. Please share your name and best contact info.";
+  return "Thanks. I can help with that. Can you share your name and best contact info?";
+}
+
+function escapeXml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function buildTranscriptFromHistory(history, maxLines = 14) {
+  const lines = [];
+  const slice = history.slice(Math.max(0, history.length - maxLines));
+  for (const msg of slice) {
+    const role = msg.role === "assistant" ? "ACS AI" : "Customer";
+    lines.push(`${role}: ${String(msg.content || "").trim()}`);
+  }
+  return lines.join("\n");
 }
 
 async function safeJson(response) {
   const text = await response.text();
-  if (!text) return {};
+  if (!text) {
+    return {};
+  }
   try {
     return JSON.parse(text);
-  } catch {
+  } catch (error) {
     return { raw: text };
   }
 }
@@ -184,8 +278,9 @@ async function getZohoAccessToken() {
     grant_type: "refresh_token"
   });
 
+  const tokenUrl = "https://accounts.zoho.com/oauth/v2/token";
   const response = await fetchWithRetry(
-    "https://accounts.zoho.com/oauth/v2/token",
+    tokenUrl,
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -195,9 +290,11 @@ async function getZohoAccessToken() {
   );
 
   const data = await safeJson(response);
+
   if (!response.ok || !data.access_token) {
     throw new Error(`Zoho token error: ${JSON.stringify(data)}`);
   }
+
   return data.access_token;
 }
 
@@ -207,6 +304,7 @@ async function createZohoAiIntakeRecord(payload) {
   const owner = process.env.ZOHO_CREATOR_OWNER;
   const appLink = process.env.ZOHO_CREATOR_APP_LINK;
   const formLink = "AI_Intake_Log";
+
   const url = `https://www.zohoapis.com/creator/v2.1/data/${owner}/${appLink}/form/${formLink}`;
 
   const dataPayload = {
@@ -233,6 +331,8 @@ async function createZohoAiIntakeRecord(payload) {
     };
   }
 
+  const body = { data: dataPayload };
+
   const response = await fetchWithRetry(
     url,
     {
@@ -241,12 +341,13 @@ async function createZohoAiIntakeRecord(payload) {
         Authorization: `Zoho-oauthtoken ${accessToken}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ data: dataPayload })
+      body: JSON.stringify(body)
     },
     "zoho-creator-create"
   );
 
   const data = await safeJson(response);
+
   if (!response.ok || (data.code && data.code !== 3000)) {
     throw new Error(`Zoho Creator create record error: ${JSON.stringify(data)}`);
   }
@@ -270,7 +371,6 @@ app.post("/api/ai/create-intake", async (req, res) => {
       urgency,
       request_summary,
       intent,
-      ai_confidence,
       chat_session_id
     } = req.body;
 
@@ -278,35 +378,39 @@ app.post("/api/ai/create-intake", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Missing required intake fields." });
     }
 
-    const normalizedPayload = {
-      channel,
+    const zohoResult = await createZohoAiIntakeRecord({
+      channel: normalizeChannel(channel),
       customer_name,
-      phone: phone || "",
-      email: email || "",
-      address: address || "",
-      service_type: mapServiceType(service_type),
-      urgency: mapUrgency(urgency),
+      phone,
+      email,
+      address,
+      service_type,
+      urgency,
       request_summary,
-      intent: intent || "",
-      ai_confidence,
-      chat_session_id: chat_session_id || ""
-    };
-
-    const zohoResult = await createZohoAiIntakeRecord(normalizedPayload);
+      intent,
+      chat_session_id
+    });
 
     return res.json({
       ok: true,
       message: "AI intake received and sent to Zoho Creator.",
       zoho: zohoResult,
-      intake: normalizedPayload
+      intake: {
+        channel: normalizeChannel(channel),
+        customer_name,
+        phone: phone || "",
+        email: email || "",
+        address: address || "",
+        service_type,
+        urgency,
+        request_summary,
+        intent: intent || "",
+        chat_session_id: chat_session_id || ""
+      }
     });
   } catch (error) {
     console.error("create-intake error:", error);
-    return res.status(500).json({
-      ok: false,
-      error: "Server error.",
-      details: error.message
-    });
+    return res.status(500).json({ ok: false, error: "Server error.", details: error.message });
   }
 });
 
@@ -318,6 +422,7 @@ app.post("/api/ai/chat", async (req, res) => {
 
     const userMessage = (req.body.message || "").toString().trim();
     const chatSessionId = (req.body.chat_session_id || "").toString().trim();
+    const channel = normalizeChannel(req.body.channel);
 
     if (userMessage === "") {
       return res.status(400).json({ ok: false, error: "Missing message." });
@@ -326,7 +431,7 @@ app.post("/api/ai/chat", async (req, res) => {
     const first = await openai.responses.create({
       model: OPENAI_MODEL,
       input: [
-        { role: "system", content: buildSystemPrompt() },
+        { role: "system", content: channel === "Phone" ? buildPhoneSystemPrompt() : buildSystemPrompt() },
         { role: "user", content: userMessage }
       ],
       tools: [createIntakeToolSchema()],
@@ -336,24 +441,18 @@ app.post("/api/ai/chat", async (req, res) => {
     const toolCall = extractFunctionCall(first);
 
     if (!toolCall) {
-      return res.json({
-        ok: true,
-        intake_created: false,
-        reply: responseText(first)
-      });
+      return res.json({ ok: true, intake_created: false, reply: responseText(first) });
     }
 
     let args = {};
     try {
       args = JSON.parse(toolCall.arguments || "{}");
-    } catch {
+    } catch (error) {
       args = {};
     }
 
-    const parsedConfidence = Number(args.ai_confidence);
-
     const normalizedPayload = {
-      channel: "Website Chat",
+      channel,
       customer_name: (args.customer_name || "").toString(),
       phone: (args.phone || "").toString(),
       email: (args.email || "").toString(),
@@ -362,7 +461,6 @@ app.post("/api/ai/chat", async (req, res) => {
       urgency: mapUrgency(args.urgency),
       request_summary: (args.request_summary || "").toString(),
       intent: (args.intent || "").toString(),
-      ai_confidence: Number.isNaN(parsedConfidence) ? undefined : parsedConfidence,
       chat_session_id: chatSessionId || (args.chat_session_id || "").toString()
     };
 
@@ -389,14 +487,122 @@ app.post("/api/ai/chat", async (req, res) => {
     });
   } catch (error) {
     console.error("ai-chat error:", error);
-    return res.status(500).json({
-      ok: false,
-      error: "AI chat server error.",
-      details: error.message
+    return res.status(500).json({ ok: false, error: "AI chat server error.", details: error.message });
+  }
+});
+
+// Twilio SMS webhook
+// Configure in Twilio Console phone number -> Messaging -> "A message comes in"
+// URL: https://<your-railway-domain>/twilio/sms
+app.post("/twilio/sms", async (req, res) => {
+  try {
+    if (!openai) {
+      res.set("Content-Type", "text/xml");
+      return res
+        .status(200)
+        .send(`<Response><Message>${escapeXml("AI is not configured yet.")}</Message></Response>`);
+    }
+
+    const from = (req.body.From || "").toString().trim();
+    const bodyText = (req.body.Body || "").toString().trim();
+
+    if (!from || !bodyText) {
+      res.set("Content-Type", "text/xml");
+      return res
+        .status(200)
+        .send(`<Response><Message>${escapeXml("Please send a message with what you need help with.")}</Message></Response>`);
+    }
+
+    const sessionId = `sms_${from}`;
+    const session = getSmsSession(sessionId);
+
+    // If we already created an intake for this SMS session, don't create another one.
+    if (session.intakeCreated) {
+      res.set("Content-Type", "text/xml");
+      return res
+        .status(200)
+        .send(
+          `<Response><Message>${escapeXml(
+            "We already received your request. A team member will follow up shortly. If you need to add details, reply with them and we'll attach them to your request."
+          )}</Message></Response>`
+        );
+    }
+
+    session.history.push({ role: "user", content: bodyText });
+
+    const first = await openai.responses.create({
+      model: OPENAI_MODEL,
+      input: [
+        { role: "system", content: buildPhoneSystemPrompt() },
+        ...session.history.map((m) => ({ role: m.role, content: m.content }))
+      ],
+      tools: [createIntakeToolSchema()],
+      tool_choice: "auto"
     });
+
+    const toolCall = extractFunctionCall(first);
+
+    // No tool call: just reply and store assistant response
+    if (!toolCall) {
+      const reply = responseText(first);
+      session.history.push({ role: "assistant", content: reply });
+      res.set("Content-Type", "text/xml");
+      return res.status(200).send(`<Response><Message>${escapeXml(reply)}</Message></Response>`);
+    }
+
+    // Tool call: parse args + normalize + inject phone from Twilio if missing
+    let args = {};
+    try {
+      args = JSON.parse(toolCall.arguments || "{}");
+    } catch (error) {
+      args = {};
+    }
+
+    const transcript = buildTranscriptFromHistory(session.history, 14);
+
+    const normalizedPayload = {
+      channel: "Phone",
+      customer_name: (args.customer_name || "").toString(),
+      phone: (args.phone || from || "").toString(),
+      email: (args.email || "").toString(),
+      address: (args.address || "").toString(),
+      service_type: mapServiceType(args.service_type),
+      urgency: mapUrgency(args.urgency),
+      request_summary: `${(args.request_summary || "").toString().trim()}\n\nSMS Transcript:\n${transcript}`.trim(),
+      intent: (args.intent || "").toString(),
+      chat_session_id: sessionId
+    };
+
+    const zohoResult = await createZohoAiIntakeRecord(normalizedPayload);
+    session.intakeCreated = true;
+
+    const second = await openai.responses.create({
+      model: OPENAI_MODEL,
+      previous_response_id: first.id,
+      input: [
+        {
+          type: "function_call_output",
+          call_id: toolCall.call_id,
+          output: JSON.stringify({ ok: true, message: "Intake created.", zoho: zohoResult })
+        }
+      ]
+    });
+
+    const reply = responseText(second);
+    session.history.push({ role: "assistant", content: reply });
+
+    res.set("Content-Type", "text/xml");
+    return res.status(200).send(`<Response><Message>${escapeXml(reply)}</Message></Response>`);
+  } catch (error) {
+    console.error("twilio-sms error:", error);
+    res.set("Content-Type", "text/xml");
+    return res
+      .status(200)
+      .send(`<Response><Message>${escapeXml("Sorry, something went wrong. Please try again.")}</Message></Response>`);
   }
 });
 
 app.listen(port, () => {
   console.log(`acs-ai-backend listening on port ${port}`);
 });
+
