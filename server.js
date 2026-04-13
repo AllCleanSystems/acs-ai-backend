@@ -1,13 +1,15 @@
-// server.js
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const fetch = require("node-fetch");
 const OpenAI = require("openai");
+const twilio = require("twilio");
 
 dotenv.config();
 
 const app = express();
+// Needed so req.protocol reflects X-Forwarded-Proto on Railway.
+app.set("trust proxy", true);
 const port = process.env.PORT || 3001;
 const REQUEST_TIMEOUT_MS = 15000;
 const RETRY_DELAY_MS = 1200;
@@ -75,27 +77,13 @@ function delay(ms) {
 }
 
 function isRetryableStatus(status) {
-  return (
-    status === 408 ||
-    status === 429 ||
-    status === 500 ||
-    status === 502 ||
-    status === 503 ||
-    status === 504
-  );
+  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
 function isRetryableNetworkError(error) {
   const code = error && error.code ? String(error.code) : "";
-  const message =
-    error && error.message ? String(error.message).toLowerCase() : "";
-  return (
-    code === "ETIMEDOUT" ||
-    code === "ECONNRESET" ||
-    code === "EAI_AGAIN" ||
-    message.includes("timeout") ||
-    message.includes("network")
-  );
+  const message = error && error.message ? String(error.message).toLowerCase() : "";
+  return code === "ETIMEDOUT" || code === "ECONNRESET" || code === "EAI_AGAIN" || message.includes("timeout") || message.includes("network");
 }
 
 function normalizeText(value) {
@@ -195,11 +183,7 @@ function extractFunctionCall(response) {
 }
 
 function responseText(response) {
-  if (
-    response &&
-    typeof response.output_text === "string" &&
-    response.output_text.trim() !== ""
-  ) {
+  if (response && typeof response.output_text === "string" && response.output_text.trim() !== "") {
     return response.output_text;
   }
   return "Thanks. I can help with that. Can you share your name and best contact info?";
@@ -222,6 +206,33 @@ function buildTranscriptFromHistory(history, maxLines = 14) {
     lines.push(`${role}: ${String(msg.content || "").trim()}`);
   }
   return lines.join("\n");
+}
+
+function shouldValidateTwilioRequests() {
+  // If auth token isn't configured, skip validation (dev-friendly).
+  // If it is configured, validate by default.
+  const token = process.env.TWILIO_AUTH_TOKEN;
+  if (!token) return false;
+  const flag = (process.env.TWILIO_VALIDATE_REQUESTS || "").toString().trim().toLowerCase();
+  if (flag === "false" || flag === "0" || flag === "no") return false;
+  return true;
+}
+
+function validateTwilioRequestOrThrow(req) {
+  if (!shouldValidateTwilioRequests()) return;
+
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const signature = (req.get("X-Twilio-Signature") || "").toString();
+
+  // Twilio validates against the exact URL you configured in the console.
+  const url = `${req.protocol}://${req.get("host")}${req.originalUrl}`;
+
+  const ok = twilio.validateRequest(authToken, signature, url, req.body || {});
+  if (!ok) {
+    const err = new Error("Invalid Twilio signature");
+    err.status = 403;
+    throw err;
+  }
 }
 
 async function safeJson(response) {
@@ -279,15 +290,13 @@ async function getZohoAccessToken() {
   });
 
   const tokenUrl = "https://accounts.zoho.com/oauth/v2/token";
-  const response = await fetchWithRetry(
-    tokenUrl,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: params.toString()
+  const response = await fetchWithRetry(tokenUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded"
     },
-    "zoho-token"
-  );
+    body: params.toString()
+  }, "zoho-token");
 
   const data = await safeJson(response);
 
@@ -331,20 +340,18 @@ async function createZohoAiIntakeRecord(payload) {
     };
   }
 
-  const body = { data: dataPayload };
+  const body = {
+    data: dataPayload
+  };
 
-  const response = await fetchWithRetry(
-    url,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Zoho-oauthtoken ${accessToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body)
+  const response = await fetchWithRetry(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Zoho-oauthtoken ${accessToken}`,
+      "Content-Type": "application/json"
     },
-    "zoho-creator-create"
-  );
+    body: JSON.stringify(body)
+  }, "zoho-creator-create");
 
   const data = await safeJson(response);
 
@@ -356,7 +363,11 @@ async function createZohoAiIntakeRecord(payload) {
 }
 
 app.get("/", (req, res) => {
-  res.json({ ok: true, service: "acs-ai-backend", status: "running" });
+  res.json({
+    ok: true,
+    service: "acs-ai-backend",
+    status: "running"
+  });
 });
 
 app.post("/api/ai/create-intake", async (req, res) => {
@@ -375,7 +386,10 @@ app.post("/api/ai/create-intake", async (req, res) => {
     } = req.body;
 
     if (!channel || !customer_name || !service_type || !urgency || !request_summary) {
-      return res.status(400).json({ ok: false, error: "Missing required intake fields." });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required intake fields."
+      });
     }
 
     const zohoResult = await createZohoAiIntakeRecord({
@@ -410,14 +424,21 @@ app.post("/api/ai/create-intake", async (req, res) => {
     });
   } catch (error) {
     console.error("create-intake error:", error);
-    return res.status(500).json({ ok: false, error: "Server error.", details: error.message });
+    return res.status(500).json({
+      ok: false,
+      error: "Server error.",
+      details: error.message
+    });
   }
 });
 
 app.post("/api/ai/chat", async (req, res) => {
   try {
     if (!openai) {
-      return res.status(500).json({ ok: false, error: "OPENAI_API_KEY is not configured." });
+      return res.status(500).json({
+        ok: false,
+        error: "OPENAI_API_KEY is not configured."
+      });
     }
 
     const userMessage = (req.body.message || "").toString().trim();
@@ -425,7 +446,10 @@ app.post("/api/ai/chat", async (req, res) => {
     const channel = normalizeChannel(req.body.channel);
 
     if (userMessage === "") {
-      return res.status(400).json({ ok: false, error: "Missing message." });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing message."
+      });
     }
 
     const first = await openai.responses.create({
@@ -441,7 +465,11 @@ app.post("/api/ai/chat", async (req, res) => {
     const toolCall = extractFunctionCall(first);
 
     if (!toolCall) {
-      return res.json({ ok: true, intake_created: false, reply: responseText(first) });
+      return res.json({
+        ok: true,
+        intake_created: false,
+        reply: responseText(first)
+      });
     }
 
     let args = {};
@@ -473,7 +501,11 @@ app.post("/api/ai/chat", async (req, res) => {
         {
           type: "function_call_output",
           call_id: toolCall.call_id,
-          output: JSON.stringify({ ok: true, message: "Intake created.", zoho: zohoResult })
+          output: JSON.stringify({
+            ok: true,
+            message: "Intake created.",
+            zoho: zohoResult
+          })
         }
       ]
     });
@@ -487,7 +519,11 @@ app.post("/api/ai/chat", async (req, res) => {
     });
   } catch (error) {
     console.error("ai-chat error:", error);
-    return res.status(500).json({ ok: false, error: "AI chat server error.", details: error.message });
+    return res.status(500).json({
+      ok: false,
+      error: "AI chat server error.",
+      details: error.message
+    });
   }
 });
 
@@ -496,11 +532,11 @@ app.post("/api/ai/chat", async (req, res) => {
 // URL: https://<your-railway-domain>/twilio/sms
 app.post("/twilio/sms", async (req, res) => {
   try {
+    validateTwilioRequestOrThrow(req);
+
     if (!openai) {
       res.set("Content-Type", "text/xml");
-      return res
-        .status(200)
-        .send(`<Response><Message>${escapeXml("AI is not configured yet.")}</Message></Response>`);
+      return res.status(200).send(`<Response><Message>${escapeXml("AI is not configured yet.")}</Message></Response>`);
     }
 
     const from = (req.body.From || "").toString().trim();
@@ -508,9 +544,7 @@ app.post("/twilio/sms", async (req, res) => {
 
     if (!from || !bodyText) {
       res.set("Content-Type", "text/xml");
-      return res
-        .status(200)
-        .send(`<Response><Message>${escapeXml("Please send a message with what you need help with.")}</Message></Response>`);
+      return res.status(200).send(`<Response><Message>${escapeXml("Please send a message with what you need help with.")}</Message></Response>`);
     }
 
     const sessionId = `sms_${from}`;
@@ -595,14 +629,15 @@ app.post("/twilio/sms", async (req, res) => {
     return res.status(200).send(`<Response><Message>${escapeXml(reply)}</Message></Response>`);
   } catch (error) {
     console.error("twilio-sms error:", error);
+    if (error && error.status === 403) {
+      res.set("Content-Type", "text/xml");
+      return res.status(403).send(`<Response><Message>${escapeXml("Forbidden.")}</Message></Response>`);
+    }
     res.set("Content-Type", "text/xml");
-    return res
-      .status(200)
-      .send(`<Response><Message>${escapeXml("Sorry, something went wrong. Please try again.")}</Message></Response>`);
+    return res.status(200).send(`<Response><Message>${escapeXml("Sorry, something went wrong. Please try again.")}</Message></Response>`);
   }
 });
 
 app.listen(port, () => {
   console.log(`acs-ai-backend listening on port ${port}`);
 });
-
