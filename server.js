@@ -24,6 +24,15 @@ const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
 
+// Outbound Twilio SMS (for internal alerts). Requires:
+// - TWILIO_ACCOUNT_SID
+// - TWILIO_AUTH_TOKEN
+// - TWILIO_FROM_NUMBER (your Twilio number, e.g. +1701...)
+const twilioClient =
+  process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
+    ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+    : null;
+
 // In-memory SMS sessions (best-effort). If Railway restarts, sessions reset.
 // Keyed by "sms_<FromPhoneNumber>".
 const smsSessions = new Map();
@@ -36,7 +45,7 @@ function getSmsSession(sessionId) {
     existing.lastSeen = now;
     return existing;
   }
-  const fresh = { lastSeen: now, history: [], intakeCreated: false };
+  const fresh = { lastSeen: now, history: [], intakeCreated: false, emergencyAlertSent: false };
   smsSessions.set(sessionId, fresh);
   return fresh;
 }
@@ -101,6 +110,26 @@ function mapServiceType(value) {
 function mapUrgency(value) {
   const key = normalizeText(value);
   return URGENCY_MAP[key] || "Normal";
+}
+
+async function sendAdminAlertSms(text) {
+  const to = (process.env.ADMIN_ALERT_PHONE || "").toString().trim();
+  const from = (process.env.TWILIO_FROM_NUMBER || "").toString().trim();
+
+  if (!to || !from || !twilioClient) {
+    console.warn("admin-alert not sent (missing TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/TWILIO_FROM_NUMBER/ADMIN_ALERT_PHONE)");
+    return;
+  }
+
+  try {
+    await twilioClient.messages.create({
+      to,
+      from,
+      body: String(text || "").slice(0, 1500)
+    });
+  } catch (err) {
+    console.error("admin-alert send failed:", err && err.message ? err.message : err);
+  }
 }
 
 function buildSystemPrompt() {
@@ -208,6 +237,131 @@ function buildTranscriptFromHistory(history, maxLines = 14) {
   return lines.join("\n");
 }
 
+// ----------------------------
+
+// FlutterFlow wrapper API auth
+// ----------------------------
+// FlutterFlow sends: x-acs-key: <FF_API_KEY>
+function requireFlutterFlowApiKey(req, res, next) {
+  const required = (process.env.FF_API_KEY || "").toString().trim();
+  if (!required) {
+    return res.status(500).json({ ok: false, error: "Server missing FF_API_KEY." });
+  }
+  const provided = (req.get("x-acs-key") || req.get("authorization") || "").toString().trim();
+  const token = provided.toLowerCase().startsWith("bearer ") ? provided.slice(7).trim() : provided;
+  if (!token || token !== required) {
+    return res.status(401).json({ ok: false, error: "Unauthorized." });
+  }
+  next();
+}
+
+function creatorBaseUrl() {
+  return (process.env.ZOHO_CREATOR_BASE_URL || "https://www.zohoapis.com").replace(/\/+$/, "");
+}
+
+function creatorOwnerAndApp() {
+  const owner = (process.env.ZOHO_CREATOR_OWNER || "").toString().trim();
+  let appLink = (process.env.ZOHO_CREATOR_APP_LINK || "").toString().trim();
+  if (!owner || !appLink) {
+    throw new Error("Missing ZOHO_CREATOR_OWNER or ZOHO_CREATOR_APP_LINK.");
+  }
+
+  // Accept either the app link name (recommended) or a full Creator URL.
+  // Example URL: https://creatorapp.zoho.com/allcleansolutions/acs-control-center2
+  if (appLink.includes("/") || appLink.toLowerCase().startsWith("http")) {
+    try {
+      const asUrl = new URL(appLink);
+      const parts = asUrl.pathname.split("/").filter(Boolean);
+      const ownerIdx = parts.findIndex((p) => p.toLowerCase() === owner.toLowerCase());
+      if (ownerIdx >= 0 && ownerIdx + 1 < parts.length) {
+        appLink = parts[ownerIdx + 1];
+      } else if (parts.length > 0) {
+        appLink = parts[parts.length - 1];
+      }
+    } catch {
+      const parts = appLink.split("/").filter(Boolean);
+      if (parts.length > 0) appLink = parts[parts.length - 1];
+    }
+  }
+  return { owner, appLink };
+}
+
+async function creatorGetReport(reportLink, query = {}) {
+  const accessToken = await getZohoAccessToken();
+  const { owner, appLink } = creatorOwnerAndApp();
+
+  const url = new URL(`${creatorBaseUrl()}/creator/v2.1/data/${owner}/${appLink}/report/${reportLink}`);
+
+  // Pass-through supported query params (all optional)
+  const allowed = [
+    "criteria",
+    "page",
+    "per_page",
+    "max_records",
+    "sort_by",
+    "sort_order",
+    "field_config"
+  ];
+  for (const key of allowed) {
+    if (query[key] !== undefined && query[key] !== null && String(query[key]).trim() !== "") {
+      url.searchParams.set(key, String(query[key]));
+    }
+  }
+
+  const response = await fetchWithRetry(
+    url.toString(),
+    { method: "GET", headers: { Authorization: `Zoho-oauthtoken ${accessToken}` } },
+    "zoho-creator-report"
+  );
+  const data = await safeJson(response);
+  if (!response.ok) {
+    throw new Error(`Zoho Creator report GET error: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
+async function creatorGetRecord(reportLink, recordId) {
+  const accessToken = await getZohoAccessToken();
+  const { owner, appLink } = creatorOwnerAndApp();
+  const url = `${creatorBaseUrl()}/creator/v2.1/data/${owner}/${appLink}/report/${reportLink}/${recordId}`;
+
+  const response = await fetchWithRetry(
+    url,
+    { method: "GET", headers: { Authorization: `Zoho-oauthtoken ${accessToken}` } },
+    "zoho-creator-record-get"
+  );
+  const data = await safeJson(response);
+  if (!response.ok) {
+    throw new Error(`Zoho Creator record GET error: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
+async function creatorUpdateRecord(reportLink, recordId, updateData) {
+  const accessToken = await getZohoAccessToken();
+  const { owner, appLink } = creatorOwnerAndApp();
+  const url = `${creatorBaseUrl()}/creator/v2.1/data/${owner}/${appLink}/report/${reportLink}/${recordId}`;
+
+  const body = { data: updateData };
+  const response = await fetchWithRetry(
+    url,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Zoho-oauthtoken ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    },
+    "zoho-creator-record-patch"
+  );
+  const data = await safeJson(response);
+  if (!response.ok) {
+    throw new Error(`Zoho Creator record PATCH error: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
 function shouldValidateTwilioRequests() {
   // If auth token isn't configured, skip validation (dev-friendly).
   // If it is configured, validate by default.
@@ -312,54 +466,93 @@ async function createZohoAiIntakeRecord(payload) {
 
   const owner = process.env.ZOHO_CREATOR_OWNER;
   const appLink = process.env.ZOHO_CREATOR_APP_LINK;
-  const formLink = "AI_Intake_Log";
+  // Creator "form link name" (not display name). New app uses `ai_intake_log`.
+  // Keep env override so you can switch apps without code changes.
+  const formLink = process.env.ZOHO_CREATOR_AI_INTAKE_FORM_LINK || "ai_intake_log";
 
-  const url = `https://www.zohoapis.com/creator/v2.1/data/${owner}/${appLink}/form/${formLink}`;
+  const creatorBase = (process.env.ZOHO_CREATOR_BASE_URL || "https://www.zohoapis.com").replace(/\/+$/, "");
+  const url = `${creatorBase}/creator/v2.1/data/${owner}/${appLink}/form/${formLink}`;
 
-  const dataPayload = {
+  // New ACS app (from your .ds export) uses lowercase link names (ai_intake_log form):
+  // channel, customer_name, phone, email, address_text, service_type, urgency,
+  // preferred_window, request_summary, transcript, chat_session_id, ai_confidence, status, ...
+  const dataPayloadV2 = {
+    channel: payload.channel,
+    customer_name: payload.customer_name,
+    phone: payload.phone || "",
+    email: payload.email || "",
+    address_text: payload.address || "",
+    service_type: payload.service_type,
+    urgency: payload.urgency,
+    preferred_window: payload.preferred_window || "",
+    request_summary: payload.request_summary,
+    transcript: payload.transcript || "",
+    chat_session_id: payload.chat_session_id || "",
+    ai_confidence:
+      payload.ai_confidence === null || payload.ai_confidence === undefined || payload.ai_confidence === ""
+        ? null
+        : Number(payload.ai_confidence),
+    status: "New",
+    // Let Creator workflows set timestamps; sending date-times in the wrong format causes 3001 errors.
+    last_sync_source: "Railway"
+  };
+
+  // Legacy fallback payload (older app variants that used Title Case link names + Address object)
+  const dataPayloadLegacy = {
     Channel: payload.channel,
     Customer_Name: payload.customer_name,
     Phone: payload.phone || "",
     Email: payload.email || "",
     Service_Type: payload.service_type,
     Urgency: payload.urgency,
+    Preferred_Window: payload.preferred_window || "",
     Request_Summary: payload.request_summary,
+    Transcript: payload.transcript || "",
     Intent: payload.intent || "",
     Chat_Session_ID: payload.chat_session_id || "",
-    AI_Status: "New"
+    AI_Confidence:
+      payload.ai_confidence === null || payload.ai_confidence === undefined || payload.ai_confidence === ""
+        ? null
+        : Number(payload.ai_confidence),
+    Status: "New",
+    Last_Sync_Source: "Railway"
   };
 
-  if (payload.address) {
-    dataPayload.Address = {
-      address_line_1: payload.address,
-      address_line_2: "",
-      district_city: "",
-      state_province: "",
-      postal_Code: "",
-      country: "United States"
-    };
+  const candidateBodies = [
+    { data: dataPayloadV2 },
+    { data: dataPayloadLegacy }
+  ];
+
+  let lastErr = null;
+  for (const body of candidateBodies) {
+    try {
+      const response = await fetchWithRetry(
+        url,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Zoho-oauthtoken ${accessToken}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(body)
+        },
+        "zoho-creator-create"
+      );
+
+      const data = await safeJson(response);
+
+      if (!response.ok || (data && data.code && data.code !== 3000)) {
+        lastErr = new Error(`Zoho Creator create record error: ${JSON.stringify(data)}`);
+        continue;
+      }
+
+      return data;
+    } catch (err) {
+      lastErr = err;
+    }
   }
 
-  const body = {
-    data: dataPayload
-  };
-
-  const response = await fetchWithRetry(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Zoho-oauthtoken ${accessToken}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  }, "zoho-creator-create");
-
-  const data = await safeJson(response);
-
-  if (!response.ok || (data.code && data.code !== 3000)) {
-    throw new Error(`Zoho Creator create record error: ${JSON.stringify(data)}`);
-  }
-
-  return data;
+  throw lastErr || new Error("Zoho Creator create record failed.");
 }
 
 app.get("/", (req, res) => {
@@ -368,6 +561,87 @@ app.get("/", (req, res) => {
     service: "acs-ai-backend",
     status: "running"
   });
+});
+
+// ----------------------------
+// FlutterFlow wrapper endpoints
+// ----------------------------
+// Header required: x-acs-key: <FF_API_KEY>
+app.get("/ui/report/:reportLink", requireFlutterFlowApiKey, async (req, res) => {
+  try {
+    const { reportLink } = req.params;
+    const data = await creatorGetReport(reportLink, req.query || {});
+    return res.json({ ok: true, report: reportLink, data });
+  } catch (err) {
+    console.error("ui-report error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Server error." });
+  }
+});
+
+app.get("/ui/report/:reportLink/:recordId", requireFlutterFlowApiKey, async (req, res) => {
+  try {
+    const { reportLink, recordId } = req.params;
+    const data = await creatorGetRecord(reportLink, recordId);
+    return res.json({ ok: true, report: reportLink, recordId, data });
+  } catch (err) {
+    console.error("ui-record-get error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Server error." });
+  }
+});
+
+app.patch("/ui/report/:reportLink/:recordId", requireFlutterFlowApiKey, async (req, res) => {
+  try {
+    const { reportLink, recordId } = req.params;
+    const updateData = req.body && typeof req.body === "object" ? (req.body.data || req.body) : null;
+    if (!updateData || typeof updateData !== "object") {
+      return res.status(400).json({ ok: false, error: "Missing JSON body. Send { data: { field: value } }." });
+    }
+    const data = await creatorUpdateRecord(reportLink, recordId, updateData);
+    return res.json({ ok: true, report: reportLink, recordId, data });
+  } catch (err) {
+    console.error("ui-record-patch error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Server error." });
+  }
+});
+
+// Convenience queue endpoints (use your report link names from the .ds export)
+app.get("/ui/ai-inbox", requireFlutterFlowApiKey, async (req, res) => {
+  try {
+    const criteria =
+      (req.query.criteria || "").toString().trim() ||
+      '(status == "Needs Info") || (escalation_flag == true)';
+    const data = await creatorGetReport("ai_intake_log_Report", { ...req.query, criteria });
+    return res.json({ ok: true, data });
+  } catch (err) {
+    console.error("ui-ai-inbox error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Server error." });
+  }
+});
+
+app.get("/ui/dispatch-queue", requireFlutterFlowApiKey, async (req, res) => {
+  try {
+    const criteria =
+      (req.query.criteria || "").toString().trim() ||
+      '((status == "Approved") || (urgency == "High") || (urgency == "Emergency"))';
+    const data = await creatorGetReport("service_requests_Report", { ...req.query, criteria });
+    return res.json({ ok: true, data });
+  } catch (err) {
+    console.error("ui-dispatch-queue error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Server error." });
+  }
+});
+
+app.get("/ui/money-queue", requireFlutterFlowApiKey, async (req, res) => {
+  try {
+    const criteria =
+      (req.query.criteria || "").toString().trim() ||
+      '((status == "Completed") && (books_invoice_id == ""))';
+    const data = await creatorGetReport("work_orders_Report", { ...req.query, criteria });
+    return res.json({ ok: true, data });
+  } catch (err) {
+    console.error("ui-money-queue error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Server error." });
+  }
 });
 
 app.post("/api/ai/create-intake", async (req, res) => {
@@ -526,7 +800,6 @@ app.post("/api/ai/chat", async (req, res) => {
     });
   }
 });
-
 // Twilio SMS webhook
 // Configure in Twilio Console phone number -> Messaging -> "A message comes in"
 // URL: https://<your-railway-domain>/twilio/sms
@@ -610,6 +883,21 @@ app.post("/twilio/sms", async (req, res) => {
     const zohoResult = await createZohoAiIntakeRecord(normalizedPayload);
     session.intakeCreated = true;
 
+    // Emergency alert (one per SMS session)
+    if (normalizedPayload.urgency === "Emergency" && !session.emergencyAlertSent) {
+      session.emergencyAlertSent = true;
+      const alertLines = [
+        "ACS EMERGENCY LEAD",
+        `From: ${from}`,
+        normalizedPayload.customer_name ? `Name: ${normalizedPayload.customer_name}` : null,
+        normalizedPayload.service_type ? `Service: ${normalizedPayload.service_type}` : null,
+        normalizedPayload.address ? `Address: ${normalizedPayload.address}` : null,
+        normalizedPayload.request_summary ? `Summary: ${normalizedPayload.request_summary.split("\n")[0]}` : null,
+        `Session: ${sessionId}`
+      ].filter(Boolean);
+      await sendAdminAlertSms(alertLines.join("\n"));
+    }
+
     const second = await openai.responses.create({
       model: OPENAI_MODEL,
       previous_response_id: first.id,
@@ -641,4 +929,3 @@ app.post("/twilio/sms", async (req, res) => {
 app.listen(port, () => {
   console.log(`acs-ai-backend listening on port ${port}`);
 });
-
