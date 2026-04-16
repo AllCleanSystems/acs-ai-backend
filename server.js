@@ -238,7 +238,6 @@ function buildTranscriptFromHistory(history, maxLines = 14) {
 }
 
 // ----------------------------
-
 // FlutterFlow wrapper API auth
 // ----------------------------
 // FlutterFlow sends: x-acs-key: <FF_API_KEY>
@@ -323,10 +322,14 @@ async function creatorGetReport(reportLink, query = {}) {
 async function creatorGetRecord(reportLink, recordId) {
   const accessToken = await getZohoAccessToken();
   const { owner, appLink } = creatorOwnerAndApp();
-  const url = `${creatorBaseUrl()}/creator/v2.1/data/${owner}/${appLink}/report/${reportLink}/${recordId}`;
+  const url = new URL(
+    `${creatorBaseUrl()}/creator/v2.1/data/${encodeURIComponent(owner)}/${encodeURIComponent(appLink)}/report/${encodeURIComponent(
+      reportLink
+    )}/${encodeURIComponent(String(recordId))}`
+  );
 
   const response = await fetchWithRetry(
-    url,
+    url.toString(),
     { method: "GET", headers: { Authorization: `Zoho-oauthtoken ${accessToken}` } },
     "zoho-creator-record-get"
   );
@@ -340,11 +343,15 @@ async function creatorGetRecord(reportLink, recordId) {
 async function creatorUpdateRecord(reportLink, recordId, updateData) {
   const accessToken = await getZohoAccessToken();
   const { owner, appLink } = creatorOwnerAndApp();
-  const url = `${creatorBaseUrl()}/creator/v2.1/data/${owner}/${appLink}/report/${reportLink}/${recordId}`;
+  const url = new URL(
+    `${creatorBaseUrl()}/creator/v2.1/data/${encodeURIComponent(owner)}/${encodeURIComponent(appLink)}/report/${encodeURIComponent(
+      reportLink
+    )}/${encodeURIComponent(String(recordId))}`
+  );
 
   const body = { data: updateData };
   const response = await fetchWithRetry(
-    url,
+    url.toString(),
     {
       method: "PATCH",
       headers: {
@@ -800,6 +807,7 @@ app.post("/api/ai/chat", async (req, res) => {
     });
   }
 });
+
 // Twilio SMS webhook
 // Configure in Twilio Console phone number -> Messaging -> "A message comes in"
 // URL: https://<your-railway-domain>/twilio/sms
@@ -929,3 +937,4 @@ app.post("/twilio/sms", async (req, res) => {
 app.listen(port, () => {
   console.log(`acs-ai-backend listening on port ${port}`);
 });
+
