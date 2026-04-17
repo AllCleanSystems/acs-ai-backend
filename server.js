@@ -725,6 +725,44 @@ app.patch("/ui/record/:reportLink", requireFlutterFlowApiKey, async (req, res) =
   }
 });
 
+// Body-based variants for FlutterFlow.
+// Some FlutterFlow configurations fail to substitute URL params like {recordId}.
+//
+// Usage:
+// - POST  /ui/record-by-body/<reportLink>   body: { "recordId": "<ID>" }
+// - PATCH /ui/record-by-body/<reportLink>  body: { "recordId": "<ID>", "data": { ... } }
+app.post("/ui/record-by-body/:reportLink", requireFlutterFlowApiKey, async (req, res) => {
+  try {
+    const { reportLink } = req.params;
+    const recordId = req.body && typeof req.body === "object" ? (req.body.recordId || req.body.id || "") : "";
+    assertValidCreatorPathParams(reportLink, recordId);
+    const data = await creatorGetRecord(reportLink, String(recordId));
+    return res.json({ ok: true, report: reportLink, recordId: String(recordId), data });
+  } catch (err) {
+    console.error("ui-record-by-body(get) error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Server error." });
+  }
+});
+
+app.patch("/ui/record-by-body/:reportLink", requireFlutterFlowApiKey, async (req, res) => {
+  try {
+    const { reportLink } = req.params;
+    const recordId = req.body && typeof req.body === "object" ? (req.body.recordId || req.body.id || "") : "";
+    const updateData = req.body && typeof req.body === "object" ? (req.body.data || null) : null;
+    assertValidCreatorPathParams(reportLink, recordId);
+    if (!updateData || typeof updateData !== "object") {
+      return res.status(400).json({ ok: false, error: "Missing JSON body. Send { recordId, data: { field: value } }." });
+    }
+    const data = await creatorUpdateRecord(reportLink, String(recordId), updateData);
+    return res.json({ ok: true, report: reportLink, recordId: String(recordId), data });
+  } catch (err) {
+    console.error("ui-record-by-body(patch) error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Server error." });
+  }
+});
+
 // Convenience queue endpoints (use your report link names from the .ds export)
 app.get("/ui/ai-inbox", requireFlutterFlowApiKey, async (req, res) => {
   try {
