@@ -618,6 +618,36 @@ app.get("/", (req, res) => {
 // FlutterFlow wrapper endpoints
 // ----------------------------
 // Header required: x-acs-key: <FF_API_KEY>
+function assertValidCreatorPathParams(reportLink, recordId) {
+  const link = (reportLink || "").toString().trim();
+  const id = (recordId || "").toString().trim();
+
+  // Report link names from Creator exports are typically like: ai_intake_log_Report
+  if (!link || !/^[A-Za-z0-9_]+$/.test(link) || link.includes("{") || link.includes("}")) {
+    const err = new Error(
+      `Invalid reportLink '${link}'. Use the Creator report link name (letters/numbers/underscore only), e.g. ai_intake_log_Report.`
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+
+  // Creator record IDs are numeric strings (BIGINT). FlutterFlow misconfig often sends "{recordId}" or blank.
+  if (
+    !id ||
+    id === "undefined" ||
+    id === "null" ||
+    id.includes("{") ||
+    id.includes("}") ||
+    !/^[0-9]+$/.test(id)
+  ) {
+    const err = new Error(
+      `Invalid recordId '${id}'. In FlutterFlow, define a String variable named recordId and pass a real numeric Creator record ID (example: 4879112000000152004).`
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
 app.get("/ui/report/:reportLink", requireFlutterFlowApiKey, async (req, res) => {
   try {
     const { reportLink } = req.params;
@@ -632,17 +662,20 @@ app.get("/ui/report/:reportLink", requireFlutterFlowApiKey, async (req, res) => 
 app.get("/ui/report/:reportLink/:recordId", requireFlutterFlowApiKey, async (req, res) => {
   try {
     const { reportLink, recordId } = req.params;
+    assertValidCreatorPathParams(reportLink, recordId);
     const data = await creatorGetRecord(reportLink, recordId);
     return res.json({ ok: true, report: reportLink, recordId, data });
   } catch (err) {
     console.error("ui-record-get error:", err);
-    return res.status(500).json({ ok: false, error: err.message || "Server error." });
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Server error." });
   }
 });
 
 app.patch("/ui/report/:reportLink/:recordId", requireFlutterFlowApiKey, async (req, res) => {
   try {
     const { reportLink, recordId } = req.params;
+    assertValidCreatorPathParams(reportLink, recordId);
     const updateData = req.body && typeof req.body === "object" ? (req.body.data || req.body) : null;
     if (!updateData || typeof updateData !== "object") {
       return res.status(400).json({ ok: false, error: "Missing JSON body. Send { data: { field: value } }." });
@@ -651,7 +684,8 @@ app.patch("/ui/report/:reportLink/:recordId", requireFlutterFlowApiKey, async (r
     return res.json({ ok: true, report: reportLink, recordId, data });
   } catch (err) {
     console.error("ui-record-patch error:", err);
-    return res.status(500).json({ ok: false, error: err.message || "Server error." });
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Server error." });
   }
 });
 
@@ -924,4 +958,91 @@ app.post("/twilio/sms", async (req, res) => {
       model: OPENAI_MODEL,
       input: [
         { role: "system", content: buildPhoneSystemPrompt() },
-        ...sessi
+        ...session.history.map((m) => ({ role: m.role, content: m.content }))
+      ],
+      tools: [createIntakeToolSchema()],
+      tool_choice: "auto"
+    });
+
+    const toolCall = extractFunctionCall(first);
+
+    // No tool call: just reply and store assistant response
+    if (!toolCall) {
+      const reply = responseText(first);
+      session.history.push({ role: "assistant", content: reply });
+      res.set("Content-Type", "text/xml");
+      return res.status(200).send(`<Response><Message>${escapeXml(reply)}</Message></Response>`);
+    }
+
+    // Tool call: parse args + normalize + inject phone from Twilio if missing
+    let args = {};
+    try {
+      args = JSON.parse(toolCall.arguments || "{}");
+    } catch (error) {
+      args = {};
+    }
+
+    const transcript = buildTranscriptFromHistory(session.history, 14);
+
+    const normalizedPayload = {
+      channel: "Phone",
+      customer_name: (args.customer_name || "").toString(),
+      phone: (args.phone || from || "").toString(),
+      email: (args.email || "").toString(),
+      address: (args.address || "").toString(),
+      service_type: mapServiceType(args.service_type),
+      urgency: mapUrgency(args.urgency),
+      request_summary: `${(args.request_summary || "").toString().trim()}\n\nSMS Transcript:\n${transcript}`.trim(),
+      intent: (args.intent || "").toString(),
+      chat_session_id: sessionId
+    };
+
+    const zohoResult = await createZohoAiIntakeRecord(normalizedPayload);
+    session.intakeCreated = true;
+
+    // Emergency alert (one per SMS session)
+    if (normalizedPayload.urgency === "Emergency" && !session.emergencyAlertSent) {
+      session.emergencyAlertSent = true;
+      const alertLines = [
+        "ACS EMERGENCY LEAD",
+        `From: ${from}`,
+        normalizedPayload.customer_name ? `Name: ${normalizedPayload.customer_name}` : null,
+        normalizedPayload.service_type ? `Service: ${normalizedPayload.service_type}` : null,
+        normalizedPayload.address ? `Address: ${normalizedPayload.address}` : null,
+        normalizedPayload.request_summary ? `Summary: ${normalizedPayload.request_summary.split("\n")[0]}` : null,
+        `Session: ${sessionId}`
+      ].filter(Boolean);
+      await sendAdminAlertSms(alertLines.join("\n"));
+    }
+
+    const second = await openai.responses.create({
+      model: OPENAI_MODEL,
+      previous_response_id: first.id,
+      input: [
+        {
+          type: "function_call_output",
+          call_id: toolCall.call_id,
+          output: JSON.stringify({ ok: true, message: "Intake created.", zoho: zohoResult })
+        }
+      ]
+    });
+
+    const reply = responseText(second);
+    session.history.push({ role: "assistant", content: reply });
+
+    res.set("Content-Type", "text/xml");
+    return res.status(200).send(`<Response><Message>${escapeXml(reply)}</Message></Response>`);
+  } catch (error) {
+    console.error("twilio-sms error:", error);
+    if (error && error.status === 403) {
+      res.set("Content-Type", "text/xml");
+      return res.status(403).send(`<Response><Message>${escapeXml("Forbidden.")}</Message></Response>`);
+    }
+    res.set("Content-Type", "text/xml");
+    return res.status(200).send(`<Response><Message>${escapeXml("Sorry, something went wrong. Please try again.")}</Message></Response>`);
+  }
+});
+
+app.listen(port, () => {
+  console.log(`acs-ai-backend listening on port ${port}`);
+});
