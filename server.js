@@ -442,7 +442,33 @@ async function fetchWithRetry(url, options = {}, context = "request") {
   throw lastError || new Error(`${context} failed`);
 }
 
+// Zoho OAuth token caching (in-memory).
+// Zoho access tokens are short-lived. Refresh tokens must be kept server-side.
+// Without caching, UI polling/tests can cause repeated refresh_token calls and trigger Zoho throttling.
+let zohoAccessTokenCache = "";
+let zohoAccessTokenExpiresAtMs = 0;
+let zohoTokenRefreshInFlight = null;
+let zohoTokenCooldownUntilMs = 0;
+
 async function getZohoAccessToken() {
+  const now = Date.now();
+
+  // If we have a token that is still valid for at least 30 seconds, reuse it.
+  if (zohoAccessTokenCache && now + 30_000 < zohoAccessTokenExpiresAtMs) {
+    return zohoAccessTokenCache;
+  }
+
+  // If Zoho is throttling refresh calls, avoid hammering their token endpoint.
+  if (now < zohoTokenCooldownUntilMs && !(zohoAccessTokenCache && now < zohoAccessTokenExpiresAtMs)) {
+    throw new Error("Zoho token error: throttled. Please wait a minute and try again.");
+  }
+
+  // Coalesce concurrent refreshes into one request.
+  if (zohoTokenRefreshInFlight) {
+    return zohoTokenRefreshInFlight;
+  }
+
+  zohoTokenRefreshInFlight = (async () => {
   const params = new URLSearchParams({
     refresh_token: process.env.ZOHO_REFRESH_TOKEN || "",
     client_id: process.env.ZOHO_CLIENT_ID || "",
@@ -462,10 +488,28 @@ async function getZohoAccessToken() {
   const data = await safeJson(response);
 
   if (!response.ok || !data.access_token) {
+    const desc = (data && (data.error_description || data.error)) ? String(data.error_description || data.error) : "";
+    // Zoho sometimes returns "You have made too many requests continuously. Please try again after some time."
+    // Put the refresh path on cooldown to prevent immediate retry storms.
+    if (desc.toLowerCase().includes("too many requests continuously")) {
+      zohoTokenCooldownUntilMs = Date.now() + 60_000;
+    }
     throw new Error(`Zoho token error: ${JSON.stringify(data)}`);
   }
 
-  return data.access_token;
+  const token = String(data.access_token);
+  // Prefer expires_in_sec if present; otherwise assume ~1 hour.
+  const expiresInSec = Number(data.expires_in_sec || data.expires_in || 3600);
+  const ttlMs = Math.max(60_000, (expiresInSec - 60) * 1000); // refresh 60s early, min 60s ttl
+
+  zohoAccessTokenCache = token;
+  zohoAccessTokenExpiresAtMs = Date.now() + ttlMs;
+  return token;
+  })().finally(() => {
+    zohoTokenRefreshInFlight = null;
+  });
+
+  return zohoTokenRefreshInFlight;
 }
 
 async function createZohoAiIntakeRecord(payload) {
@@ -621,6 +665,37 @@ app.get("/ui/ai-inbox", requireFlutterFlowApiKey, async (req, res) => {
     return res.json({ ok: true, data });
   } catch (err) {
     console.error("ui-ai-inbox error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Server error." });
+  }
+});
+
+// FlutterFlow-friendly variants of the AI inbox list:
+// - /ui/ai-inbox/items returns a top-level "items" array (easy to bind to).
+// - /ui/ai-inbox/list returns the array as the root JSON response.
+app.get("/ui/ai-inbox/items", requireFlutterFlowApiKey, async (req, res) => {
+  try {
+    const criteria =
+      (req.query.criteria || "").toString().trim() ||
+      '(status == "Needs Info") || (escalation_flag == true)';
+    const data = await creatorGetReport("ai_intake_log_Report", { ...req.query, criteria });
+    const items = data && Array.isArray(data.data) ? data.data : [];
+    return res.json({ ok: true, items, meta: { code: data && data.code ? data.code : undefined } });
+  } catch (err) {
+    console.error("ui-ai-inbox-items error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Server error." });
+  }
+});
+
+app.get("/ui/ai-inbox/list", requireFlutterFlowApiKey, async (req, res) => {
+  try {
+    const criteria =
+      (req.query.criteria || "").toString().trim() ||
+      '(status == "Needs Info") || (escalation_flag == true)';
+    const data = await creatorGetReport("ai_intake_log_Report", { ...req.query, criteria });
+    const items = data && Array.isArray(data.data) ? data.data : [];
+    return res.json(items);
+  } catch (err) {
+    console.error("ui-ai-inbox-list error:", err);
     return res.status(500).json({ ok: false, error: err.message || "Server error." });
   }
 });
@@ -849,92 +924,4 @@ app.post("/twilio/sms", async (req, res) => {
       model: OPENAI_MODEL,
       input: [
         { role: "system", content: buildPhoneSystemPrompt() },
-        ...session.history.map((m) => ({ role: m.role, content: m.content }))
-      ],
-      tools: [createIntakeToolSchema()],
-      tool_choice: "auto"
-    });
-
-    const toolCall = extractFunctionCall(first);
-
-    // No tool call: just reply and store assistant response
-    if (!toolCall) {
-      const reply = responseText(first);
-      session.history.push({ role: "assistant", content: reply });
-      res.set("Content-Type", "text/xml");
-      return res.status(200).send(`<Response><Message>${escapeXml(reply)}</Message></Response>`);
-    }
-
-    // Tool call: parse args + normalize + inject phone from Twilio if missing
-    let args = {};
-    try {
-      args = JSON.parse(toolCall.arguments || "{}");
-    } catch (error) {
-      args = {};
-    }
-
-    const transcript = buildTranscriptFromHistory(session.history, 14);
-
-    const normalizedPayload = {
-      channel: "Phone",
-      customer_name: (args.customer_name || "").toString(),
-      phone: (args.phone || from || "").toString(),
-      email: (args.email || "").toString(),
-      address: (args.address || "").toString(),
-      service_type: mapServiceType(args.service_type),
-      urgency: mapUrgency(args.urgency),
-      request_summary: `${(args.request_summary || "").toString().trim()}\n\nSMS Transcript:\n${transcript}`.trim(),
-      intent: (args.intent || "").toString(),
-      chat_session_id: sessionId
-    };
-
-    const zohoResult = await createZohoAiIntakeRecord(normalizedPayload);
-    session.intakeCreated = true;
-
-    // Emergency alert (one per SMS session)
-    if (normalizedPayload.urgency === "Emergency" && !session.emergencyAlertSent) {
-      session.emergencyAlertSent = true;
-      const alertLines = [
-        "ACS EMERGENCY LEAD",
-        `From: ${from}`,
-        normalizedPayload.customer_name ? `Name: ${normalizedPayload.customer_name}` : null,
-        normalizedPayload.service_type ? `Service: ${normalizedPayload.service_type}` : null,
-        normalizedPayload.address ? `Address: ${normalizedPayload.address}` : null,
-        normalizedPayload.request_summary ? `Summary: ${normalizedPayload.request_summary.split("\n")[0]}` : null,
-        `Session: ${sessionId}`
-      ].filter(Boolean);
-      await sendAdminAlertSms(alertLines.join("\n"));
-    }
-
-    const second = await openai.responses.create({
-      model: OPENAI_MODEL,
-      previous_response_id: first.id,
-      input: [
-        {
-          type: "function_call_output",
-          call_id: toolCall.call_id,
-          output: JSON.stringify({ ok: true, message: "Intake created.", zoho: zohoResult })
-        }
-      ]
-    });
-
-    const reply = responseText(second);
-    session.history.push({ role: "assistant", content: reply });
-
-    res.set("Content-Type", "text/xml");
-    return res.status(200).send(`<Response><Message>${escapeXml(reply)}</Message></Response>`);
-  } catch (error) {
-    console.error("twilio-sms error:", error);
-    if (error && error.status === 403) {
-      res.set("Content-Type", "text/xml");
-      return res.status(403).send(`<Response><Message>${escapeXml("Forbidden.")}</Message></Response>`);
-    }
-    res.set("Content-Type", "text/xml");
-    return res.status(200).send(`<Response><Message>${escapeXml("Sorry, something went wrong. Please try again.")}</Message></Response>`);
-  }
-});
-
-app.listen(port, () => {
-  console.log(`acs-ai-backend listening on port ${port}`);
-});
-
+        ...sessi
