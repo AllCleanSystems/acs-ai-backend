@@ -689,6 +689,42 @@ app.patch("/ui/report/:reportLink/:recordId", requireFlutterFlowApiKey, async (r
   }
 });
 
+// Query-param variants for FlutterFlow. Some FlutterFlow setups fail to substitute {recordId} path vars reliably.
+// Usage:
+// - GET   /ui/record/<reportLink>?recordId=<ID>
+// - PATCH /ui/record/<reportLink>?recordId=<ID>   body: { "data": { ... } }
+app.get("/ui/record/:reportLink", requireFlutterFlowApiKey, async (req, res) => {
+  try {
+    const { reportLink } = req.params;
+    const recordId = (req.query.recordId || req.query.id || "").toString();
+    assertValidCreatorPathParams(reportLink, recordId);
+    const data = await creatorGetRecord(reportLink, recordId);
+    return res.json({ ok: true, report: reportLink, recordId: recordId.toString(), data });
+  } catch (err) {
+    console.error("ui-record-get(qs) error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Server error." });
+  }
+});
+
+app.patch("/ui/record/:reportLink", requireFlutterFlowApiKey, async (req, res) => {
+  try {
+    const { reportLink } = req.params;
+    const recordId = (req.query.recordId || req.query.id || "").toString();
+    assertValidCreatorPathParams(reportLink, recordId);
+    const updateData = req.body && typeof req.body === "object" ? (req.body.data || req.body) : null;
+    if (!updateData || typeof updateData !== "object") {
+      return res.status(400).json({ ok: false, error: "Missing JSON body. Send { data: { field: value } }." });
+    }
+    const data = await creatorUpdateRecord(reportLink, recordId, updateData);
+    return res.json({ ok: true, report: reportLink, recordId: recordId.toString(), data });
+  } catch (err) {
+    console.error("ui-record-patch(qs) error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Server error." });
+  }
+});
+
 // Convenience queue endpoints (use your report link names from the .ds export)
 app.get("/ui/ai-inbox", requireFlutterFlowApiKey, async (req, res) => {
   try {
