@@ -1048,7 +1048,6 @@ app.get("/health", (req, res) => {
 // 3) POST /mobile/auth/verify { phone, code }     -> returns JWT
 // 4) POST /mobile/auth/password/bootstrap         -> admin/API-key protected
 // 5) POST /mobile/auth/password/change            -> requires mobile JWT
-// 6) POST /mobile/auth/admin-token                -> admin/API-key protected (internal use)
 
 app.post("/mobile/auth/login", async (req, res) => {
   try {
@@ -1301,62 +1300,6 @@ app.post("/mobile/auth/password/change", requireMobileJwt, async (req, res) => {
     console.error("mobile-auth-password-change error:", err);
     const status = err.statusCode || 500;
     return res.status(status).json({ ok: false, error: err.message || "Failed to change password." });
-  }
-});
-
-app.post("/mobile/auth/admin-token", requireFlutterFlowApiKey, async (req, res) => {
-  try {
-    const email = normalizeEmail(req.body && req.body.email);
-    const phoneRaw = (req.body && req.body.phone ? String(req.body.phone) : "").trim();
-    const hasEmail = isValidEmailAddress(email);
-    const phoneE164 = phoneRaw ? normalizePhoneToE164(phoneRaw) : "";
-    if (!hasEmail && !phoneE164) {
-      return res.status(400).json({ ok: false, error: "email or phone is required." });
-    }
-
-    let tech = null;
-    if (hasEmail) {
-      tech = await findTechnicianByEmail(email);
-    }
-    if (!tech && phoneE164) {
-      tech = await findTechnicianByPhone(phoneE164);
-    }
-    if (!tech) {
-      return res.status(404).json({ ok: false, error: "Technician not found for email/phone." });
-    }
-
-    const activeField = getTechnicianActiveFieldLink();
-    if (activeField) {
-      const isActive = parseBoolean(tech[activeField]);
-      if (!isActive) {
-        return res.status(403).json({ ok: false, error: "Account is inactive." });
-      }
-    }
-
-    const identity = extractTechnicianIdentity(tech);
-    const token = issueMobileJwt({
-      techId: identity.techId,
-      phoneE164: phoneE164 || identity.phoneE164,
-      role: identity.role,
-      displayName: identity.name
-    });
-
-    return res.json({
-      ok: true,
-      token,
-      source: "admin-token",
-      user: {
-        tech_id: String(identity.techId),
-        role: identity.role,
-        name: identity.name,
-        phone: identity.phoneE164,
-        email: identity.email
-      }
-    });
-  } catch (err) {
-    console.error("mobile-auth-admin-token error:", err);
-    const status = err.statusCode || 500;
-    return res.status(status).json({ ok: false, error: err.message || "Failed to issue admin token." });
   }
 });
 
