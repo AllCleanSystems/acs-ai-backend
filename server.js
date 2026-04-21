@@ -174,6 +174,153 @@ function requireMobileJwt(req, res, next) {
   }
 }
 
+const MOBILE_PASSWORD_HASH_PREFIX = "scrypt$";
+const MOBILE_PASSWORD_KEYLEN = 64;
+const MOBILE_LOGIN_MAX_FAILED_ATTEMPTS = Math.max(
+  3,
+  Number(process.env.MOBILE_LOGIN_MAX_FAILED_ATTEMPTS || 5)
+);
+const MOBILE_LOGIN_LOCKOUT_MS = Math.max(
+  60_000,
+  Number(process.env.MOBILE_LOGIN_LOCKOUT_MS || 15 * 60 * 1000)
+);
+const mobileLoginAttempts = new Map();
+
+function normalizeEmail(input) {
+  return (input || "").toString().trim().toLowerCase();
+}
+
+function isValidEmailAddress(input) {
+  const value = normalizeEmail(input);
+  return value.includes("@") && value.includes(".") && value.length >= 5;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseBoolean(value) {
+  if (typeof value === "boolean") return value;
+  const text = creatorFieldDisplayValue(value).trim().toLowerCase();
+  return text === "true" || text === "1" || text === "yes";
+}
+
+function getTechnicianEmailFieldLink() {
+  return (process.env.ZOHO_CREATOR_TECHNICIAN_EMAIL_FIELD || "email").toString().trim();
+}
+
+function getTechnicianPasswordHashFieldLink() {
+  return (process.env.ZOHO_CREATOR_TECHNICIAN_PASSWORD_HASH_FIELD || "mobile_password_hash").toString().trim();
+}
+
+function getTechnicianActiveFieldLink() {
+  return (process.env.ZOHO_CREATOR_TECHNICIAN_ACTIVE_FIELD || "").toString().trim();
+}
+
+function getTechnicianAuthProviderFieldLink() {
+  return (process.env.ZOHO_CREATOR_TECHNICIAN_AUTH_PROVIDER_FIELD || "auth_provider").toString().trim();
+}
+
+function mobileLoginAttemptState(key) {
+  const now = Date.now();
+  const existing = mobileLoginAttempts.get(key);
+  if (!existing) {
+    const fresh = { failedCount: 0, lockedUntilMs: 0 };
+    mobileLoginAttempts.set(key, fresh);
+    return fresh;
+  }
+  if (existing.lockedUntilMs && now > existing.lockedUntilMs) {
+    existing.failedCount = 0;
+    existing.lockedUntilMs = 0;
+  }
+  return existing;
+}
+
+function registerMobileLoginFailure(key) {
+  const state = mobileLoginAttemptState(key);
+  state.failedCount += 1;
+  if (state.failedCount >= MOBILE_LOGIN_MAX_FAILED_ATTEMPTS) {
+    state.lockedUntilMs = Date.now() + MOBILE_LOGIN_LOCKOUT_MS;
+  }
+  mobileLoginAttempts.set(key, state);
+  return state;
+}
+
+function clearMobileLoginFailures(key) {
+  mobileLoginAttempts.delete(key);
+}
+
+function mobileLockoutRemainingMs(key) {
+  const state = mobileLoginAttemptState(key);
+  const remaining = state.lockedUntilMs - Date.now();
+  return Math.max(0, remaining);
+}
+
+function cleanupMobileLoginAttempts() {
+  const now = Date.now();
+  for (const [key, state] of mobileLoginAttempts.entries()) {
+    if (!state) {
+      mobileLoginAttempts.delete(key);
+      continue;
+    }
+    if ((state.lockedUntilMs || 0) < now && (state.failedCount || 0) === 0) {
+      mobileLoginAttempts.delete(key);
+    }
+  }
+}
+setInterval(cleanupMobileLoginAttempts, 1000 * 60 * 30).unref();
+
+function scryptHash(password, salt) {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, MOBILE_PASSWORD_KEYLEN, (err, derivedKey) => {
+      if (err) return reject(err);
+      return resolve(derivedKey);
+    });
+  });
+}
+
+async function hashMobilePassword(password) {
+  const salt = crypto.randomBytes(16);
+  const derivedKey = await scryptHash(password, salt);
+  return `${MOBILE_PASSWORD_HASH_PREFIX}${salt.toString("base64")}$${derivedKey.toString("base64")}`;
+}
+
+async function verifyMobilePassword(password, storedHash) {
+  const value = (storedHash || "").toString().trim();
+  if (!value.startsWith(MOBILE_PASSWORD_HASH_PREFIX)) {
+    return false;
+  }
+  const parts = value.split("$");
+  if (parts.length !== 3) {
+    return false;
+  }
+  try {
+    const salt = Buffer.from(parts[1], "base64");
+    const expected = Buffer.from(parts[2], "base64");
+    const actual = await scryptHash(password, salt);
+    if (actual.length !== expected.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
+}
+
+function validateNewMobilePassword(password) {
+  const value = (password || "").toString();
+  if (value.length < 8) {
+    const err = new Error("Password must be at least 8 characters.");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!/[A-Z]/.test(value) || !/[a-z]/.test(value) || !/[0-9]/.test(value)) {
+    const err = new Error("Password must include uppercase, lowercase, and number.");
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
 // In-memory SMS sessions (best-effort). If Railway restarts, sessions reset.
 // Keyed by "sms_<FromPhoneNumber>".
 const smsSessions = new Map();
@@ -778,6 +925,60 @@ async function findTechnicianByPhone(phoneE164) {
   return rows[0] || null;
 }
 
+async function findTechnicianByEmail(email) {
+  const reportLink = (process.env.ZOHO_CREATOR_TECHNICIANS_REPORT_LINK || "technicians_Report").toString().trim();
+  const emailField = getTechnicianEmailFieldLink();
+  const normalized = normalizeEmail(email);
+  const raw = (email || "").toString().trim();
+  const attempts = raw && raw !== normalized ? [normalized, raw] : [normalized];
+  for (const value of attempts) {
+    const criteria = `${emailField} == "${escapeCreatorCriteriaString(value)}"`;
+    const data = await creatorGetReport(reportLink, { criteria, page: 1, per_page: 1, max_records: 1 });
+    const rows = data && Array.isArray(data.data) ? data.data : [];
+    if (rows.length > 0) {
+      return rows[0];
+    }
+  }
+  return null;
+}
+
+async function findTechnicianById(techId) {
+  const id = (techId || "").toString().trim();
+  if (!/^[0-9]+$/.test(id)) {
+    return null;
+  }
+  const reportLink = (process.env.ZOHO_CREATOR_TECHNICIANS_REPORT_LINK || "technicians_Report").toString().trim();
+  const criteria = `ID == ${id}`;
+  const data = await creatorGetReport(reportLink, { criteria, page: 1, per_page: 1, max_records: 1 });
+  const rows = data && Array.isArray(data.data) ? data.data : [];
+  return rows[0] || null;
+}
+
+function extractTechnicianIdentity(tech) {
+  const techId = tech ? tech.ID : null;
+  const role = creatorFieldDisplayValue(tech && tech.role).trim() || "Technician";
+  const name = creatorFieldDisplayValue(tech && (tech.tech_name || tech.tech_name1)).trim();
+  const phoneRaw = creatorFieldDisplayValue(tech && tech.phone).trim();
+  const emailField = getTechnicianEmailFieldLink();
+  const emailRaw = normalizeEmail(creatorFieldDisplayValue(tech && tech[emailField]) || creatorFieldDisplayValue(tech && tech.email));
+
+  let phoneE164 = "";
+  if (phoneRaw) {
+    try {
+      phoneE164 = normalizePhoneToE164(phoneRaw);
+    } catch {
+      phoneE164 = "";
+    }
+  }
+  return {
+    techId,
+    role,
+    name,
+    phoneE164,
+    email: emailRaw
+  };
+}
+
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -786,9 +987,99 @@ app.get("/", (req, res) => {
   });
 });
 
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    service: "acs-ai-backend",
+    status: "running"
+  });
+});
+
 // ----------------------------
-// Mobile (FlutterFlow) Auth: Phone + OTP via Twilio Verify
+// Mobile (FlutterFlow) Auth
 // ----------------------------
+// 1) POST /mobile/auth/login  { email, password } -> returns JWT (recommended)
+// 2) POST /mobile/auth/start  { phone }           -> sends OTP via Twilio Verify
+// 3) POST /mobile/auth/verify { phone, code }     -> returns JWT
+// 4) POST /mobile/auth/password/bootstrap         -> admin/API-key protected
+// 5) POST /mobile/auth/password/change            -> requires mobile JWT
+
+app.post("/mobile/auth/login", async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body && req.body.email);
+    const password = req.body && req.body.password ? String(req.body.password) : "";
+    if (!isValidEmailAddress(email) || !password) {
+      return res.status(400).json({ ok: false, error: "email and password are required." });
+    }
+
+    const loginKey = `email:${email}`;
+    const lockRemaining = mobileLockoutRemainingMs(loginKey);
+    if (lockRemaining > 0) {
+      return res.status(429).json({
+        ok: false,
+        error: `Too many failed attempts. Try again in ${Math.ceil(lockRemaining / 1000)} seconds.`
+      });
+    }
+
+    const tech = await findTechnicianByEmail(email);
+    if (!tech) {
+      registerMobileLoginFailure(loginKey);
+      // Small delay to reduce user enumeration signal.
+      await sleep(250);
+      return res.status(401).json({ ok: false, error: "Invalid email or password." });
+    }
+
+    const activeField = getTechnicianActiveFieldLink();
+    if (activeField) {
+      const isActive = parseBoolean(tech[activeField]);
+      if (!isActive) {
+        return res.status(403).json({ ok: false, error: "Account is inactive." });
+      }
+    }
+
+    const passwordHashField = getTechnicianPasswordHashFieldLink();
+    const storedHash = creatorFieldDisplayValue(tech[passwordHashField]).trim();
+    if (!storedHash) {
+      return res.status(403).json({
+        ok: false,
+        error: `Password not set. Ask admin to set ${passwordHashField} for this technician.`
+      });
+    }
+
+    const matched = await verifyMobilePassword(password, storedHash);
+    if (!matched) {
+      registerMobileLoginFailure(loginKey);
+      await sleep(250);
+      return res.status(401).json({ ok: false, error: "Invalid email or password." });
+    }
+
+    clearMobileLoginFailures(loginKey);
+    const identity = extractTechnicianIdentity(tech);
+    const token = issueMobileJwt({
+      techId: identity.techId,
+      phoneE164: identity.phoneE164,
+      role: identity.role,
+      displayName: identity.name
+    });
+
+    return res.json({
+      ok: true,
+      token,
+      user: {
+        tech_id: String(identity.techId),
+        role: identity.role,
+        name: identity.name,
+        phone: identity.phoneE164,
+        email: identity.email
+      }
+    });
+  } catch (err) {
+    console.error("mobile-auth-login error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Login failed." });
+  }
+});
+
 app.post("/mobile/auth/start", async (req, res) => {
   try {
     const serviceSid = (process.env.TWILIO_VERIFY_SERVICE_SID || "").toString().trim();
@@ -838,25 +1129,113 @@ app.post("/mobile/auth/verify", async (req, res) => {
       });
     }
 
-    const techId = tech.ID;
-    const role = (tech.role || "Technician").toString();
-    const name = creatorFieldDisplayValue(tech.tech_name) || creatorFieldDisplayValue(tech.tech_name1) || "";
-
-    const token = issueMobileJwt({ techId, phoneE164, role, displayName: name });
+    const identity = extractTechnicianIdentity(tech);
+    const token = issueMobileJwt({
+      techId: identity.techId,
+      phoneE164: phoneE164 || identity.phoneE164,
+      role: identity.role,
+      displayName: identity.name
+    });
     return res.json({
       ok: true,
       token,
       user: {
-        tech_id: String(techId),
-        role,
+        tech_id: String(identity.techId),
+        role: identity.role,
         phone: phoneE164,
-        name
+        name: identity.name,
+        email: identity.email
       }
     });
   } catch (err) {
     console.error("mobile-auth-verify error:", err);
     const status = err.statusCode || 400;
     return res.status(status).json({ ok: false, error: err.message || "Failed to verify OTP." });
+  }
+});
+
+app.post("/mobile/auth/password/bootstrap", requireFlutterFlowApiKey, async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body && req.body.email);
+    const password = req.body && req.body.password ? String(req.body.password) : "";
+    if (!isValidEmailAddress(email) || !password) {
+      return res.status(400).json({ ok: false, error: "email and password are required." });
+    }
+    validateNewMobilePassword(password);
+
+    const tech = await findTechnicianByEmail(email);
+    if (!tech) {
+      return res.status(404).json({ ok: false, error: "Technician not found for email." });
+    }
+
+    const reportLink = (process.env.ZOHO_CREATOR_TECHNICIANS_REPORT_LINK || "technicians_Report").toString().trim();
+    const passwordHashField = getTechnicianPasswordHashFieldLink();
+    const authProviderField = getTechnicianAuthProviderFieldLink();
+    const passwordHash = await hashMobilePassword(password);
+
+    const updateData = {};
+    updateData[passwordHashField] = passwordHash;
+    if (authProviderField) {
+      updateData[authProviderField] = "password";
+    }
+    await creatorUpdateRecord(reportLink, tech.ID, updateData);
+
+    return res.json({
+      ok: true,
+      tech_id: String(tech.ID),
+      email,
+      updated_fields: Object.keys(updateData)
+    });
+  } catch (err) {
+    console.error("mobile-auth-password-bootstrap error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to set password." });
+  }
+});
+
+app.post("/mobile/auth/password/change", requireMobileJwt, async (req, res) => {
+  try {
+    const currentPassword = req.body && req.body.current_password ? String(req.body.current_password) : "";
+    const newPassword = req.body && req.body.new_password ? String(req.body.new_password) : "";
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ ok: false, error: "current_password and new_password are required." });
+    }
+    validateNewMobilePassword(newPassword);
+
+    const tech = await findTechnicianById(req.mobileUser && req.mobileUser.sub);
+    if (!tech) {
+      return res.status(404).json({ ok: false, error: "Technician not found." });
+    }
+
+    const reportLink = (process.env.ZOHO_CREATOR_TECHNICIANS_REPORT_LINK || "technicians_Report").toString().trim();
+    const passwordHashField = getTechnicianPasswordHashFieldLink();
+    const authProviderField = getTechnicianAuthProviderFieldLink();
+    const storedHash = creatorFieldDisplayValue(tech[passwordHashField]).trim();
+    if (!storedHash) {
+      return res.status(403).json({
+        ok: false,
+        error: `Password not set. Ask admin to set ${passwordHashField} for this technician.`
+      });
+    }
+
+    const matched = await verifyMobilePassword(currentPassword, storedHash);
+    if (!matched) {
+      return res.status(401).json({ ok: false, error: "Current password is incorrect." });
+    }
+
+    const nextHash = await hashMobilePassword(newPassword);
+    const updateData = {};
+    updateData[passwordHashField] = nextHash;
+    if (authProviderField) {
+      updateData[authProviderField] = "password";
+    }
+    await creatorUpdateRecord(reportLink, tech.ID, updateData);
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("mobile-auth-password-change error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to change password." });
   }
 });
 

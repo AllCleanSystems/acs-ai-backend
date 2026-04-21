@@ -14,9 +14,13 @@ This is the starter backend for:
    - `npm start`
 3. Test:
    - `GET /`
+   - `GET /health`
+   - `POST /mobile/auth/login` (Email + Password -> JWT)
    - `POST /api/ai/create-intake`
    - `POST /mobile/auth/start`  (Twilio Verify OTP)
    - `POST /mobile/auth/verify` (Twilio Verify OTP -> JWT)
+   - `POST /mobile/auth/password/bootstrap` (API-key protected password setup)
+   - `POST /mobile/auth/password/change` (JWT protected)
 
 ## First Deploy Goal
 
@@ -27,4 +31,4 @@ After deploy, the public endpoint will be used by:
 - Wix frontend chat
 - OpenAI tool execution
 - later Zoho Creator API calls
-- FlutterFlow mobile auth (Phone + OTP) and technician endpoints
+- FlutterFlow mobile auth (Email/Password or Phone OTP) and technician endpoints
