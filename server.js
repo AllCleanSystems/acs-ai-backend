@@ -174,6 +174,20 @@ function requireMobileJwt(req, res, next) {
   }
 }
 
+// Temporary productivity mode:
+// allow data endpoints to auth via either mobile JWT or x-acs-key.
+// Keep sensitive auth/account endpoints on JWT-only.
+function requireMobileJwtOrApiKey(req, res, next) {
+  const requiredApiKey = (process.env.FF_API_KEY || "").toString().trim();
+  const providedApiKey = (req.get("x-acs-key") || "").toString().trim();
+  if (requiredApiKey && providedApiKey && providedApiKey === requiredApiKey) {
+    req.mobileUser = req.mobileUser || {};
+    req.mobileAuthMode = "api_key";
+    return next();
+  }
+  return requireMobileJwt(req, res, next);
+}
+
 const MOBILE_PASSWORD_HASH_PREFIX = "scrypt$";
 const MOBILE_PASSWORD_KEYLEN = 64;
 const MOBILE_LOGIN_MAX_FAILED_ATTEMPTS = Math.max(
@@ -1357,7 +1371,7 @@ app.get("/mobile/me", requireMobileJwt, async (req, res) => {
   return res.json({ ok: true, user: req.mobileUser });
 });
 
-app.get("/mobile/work-orders", requireMobileJwt, async (req, res) => {
+app.get("/mobile/work-orders", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = (process.env.ZOHO_CREATOR_WORK_ORDERS_REPORT_LINK || "work_orders_Report").toString().trim();
     const mine = (req.query.mine || "").toString().trim().toLowerCase();
@@ -1384,7 +1398,7 @@ app.get("/mobile/work-orders", requireMobileJwt, async (req, res) => {
   }
 });
 
-app.get("/mobile/books/invoices", requireMobileJwt, async (req, res) => {
+app.get("/mobile/books/invoices", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const orgId = (process.env.ZOHO_BOOKS_ORGANIZATION_ID || "").toString().trim();
     if (!orgId) {
@@ -1406,7 +1420,7 @@ app.get("/mobile/books/invoices", requireMobileJwt, async (req, res) => {
   }
 });
 
-app.get("/mobile/books/customers", requireMobileJwt, async (req, res) => {
+app.get("/mobile/books/customers", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const orgId = (process.env.ZOHO_BOOKS_ORGANIZATION_ID || "").toString().trim();
     if (!orgId) {
@@ -1427,7 +1441,7 @@ app.get("/mobile/books/customers", requireMobileJwt, async (req, res) => {
   }
 });
 
-app.get("/mobile/books/estimates", requireMobileJwt, async (req, res) => {
+app.get("/mobile/books/estimates", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const orgId = (process.env.ZOHO_BOOKS_ORGANIZATION_ID || "").toString().trim();
     if (!orgId) {
@@ -1449,7 +1463,7 @@ app.get("/mobile/books/estimates", requireMobileJwt, async (req, res) => {
   }
 });
 
-app.get("/mobile/crm/contacts", requireMobileJwt, async (req, res) => {
+app.get("/mobile/crm/contacts", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const { page = 1, per_page = 50 } = req.query || {};
     const data = await zohoServiceGet("crm", "/Contacts", { page, per_page });
@@ -1460,7 +1474,7 @@ app.get("/mobile/crm/contacts", requireMobileJwt, async (req, res) => {
   }
 });
 
-app.get("/mobile/crm/accounts", requireMobileJwt, async (req, res) => {
+app.get("/mobile/crm/accounts", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const { page = 1, per_page = 50 } = req.query || {};
     const data = await zohoServiceGet("crm", "/Accounts", { page, per_page });
@@ -1471,7 +1485,7 @@ app.get("/mobile/crm/accounts", requireMobileJwt, async (req, res) => {
   }
 });
 
-app.get("/mobile/crm/deals", requireMobileJwt, async (req, res) => {
+app.get("/mobile/crm/deals", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const { page = 1, per_page = 50 } = req.query || {};
     const data = await zohoServiceGet("crm", "/Deals", { page, per_page });
@@ -1482,7 +1496,7 @@ app.get("/mobile/crm/deals", requireMobileJwt, async (req, res) => {
   }
 });
 
-app.get("/mobile/crm/leads", requireMobileJwt, async (req, res) => {
+app.get("/mobile/crm/leads", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const { page = 1, per_page = 50 } = req.query || {};
     const data = await zohoServiceGet("crm", "/Leads", { page, per_page });
@@ -1493,7 +1507,7 @@ app.get("/mobile/crm/leads", requireMobileJwt, async (req, res) => {
   }
 });
 
-app.get("/mobile/fsm/work-orders", requireMobileJwt, async (req, res) => {
+app.get("/mobile/fsm/work-orders", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const { page, per_page, status } = req.query || {};
     const data = await zohoServiceGet("fsm", "/Work_Orders", { page, per_page, status });
@@ -1508,7 +1522,7 @@ app.get("/mobile/fsm/work-orders", requireMobileJwt, async (req, res) => {
   }
 });
 
-app.get("/mobile/fsm/requests", requireMobileJwt, async (req, res) => {
+app.get("/mobile/fsm/requests", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const { page, per_page, status } = req.query || {};
     const data = await zohoServiceGet("fsm", "/Requests", { page, per_page, status });
@@ -1523,7 +1537,7 @@ app.get("/mobile/fsm/requests", requireMobileJwt, async (req, res) => {
   }
 });
 
-app.get("/mobile/fsm/contacts", requireMobileJwt, async (req, res) => {
+app.get("/mobile/fsm/contacts", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const { page, per_page } = req.query || {};
     const data = await zohoServiceGet("fsm", "/Contacts", { page, per_page });
@@ -1538,7 +1552,7 @@ app.get("/mobile/fsm/contacts", requireMobileJwt, async (req, res) => {
   }
 });
 
-app.get("/mobile/fsm/service-appointments", requireMobileJwt, async (req, res) => {
+app.get("/mobile/fsm/service-appointments", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const { page, per_page, status } = req.query || {};
     const data = await zohoServiceGet("fsm", "/Service_Appointments", { page, per_page, status });
@@ -1563,7 +1577,7 @@ function assertValidCreatorLinkName(value, label = "link") {
   return text;
 }
 
-app.get("/mobile/creator/report/:reportLink", requireMobileJwt, async (req, res) => {
+app.get("/mobile/creator/report/:reportLink", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
     const data = await creatorGetReport(reportLink, req.query || {});
@@ -1575,7 +1589,7 @@ app.get("/mobile/creator/report/:reportLink", requireMobileJwt, async (req, res)
   }
 });
 
-app.get("/mobile/creator/report/:reportLink/:recordId", requireMobileJwt, async (req, res) => {
+app.get("/mobile/creator/report/:reportLink/:recordId", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
     const recordId = (req.params.recordId || "").toString().trim();
@@ -1589,7 +1603,7 @@ app.get("/mobile/creator/report/:reportLink/:recordId", requireMobileJwt, async 
   }
 });
 
-app.post("/mobile/creator/form/:formLink", requireMobileJwt, async (req, res) => {
+app.post("/mobile/creator/form/:formLink", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const formLink = assertValidCreatorLinkName(req.params.formLink, "formLink");
     const createData = req.body && typeof req.body === "object" ? (req.body.data || req.body) : null;
@@ -1605,7 +1619,7 @@ app.post("/mobile/creator/form/:formLink", requireMobileJwt, async (req, res) =>
   }
 });
 
-app.patch("/mobile/creator/report/:reportLink/:recordId", requireMobileJwt, async (req, res) => {
+app.patch("/mobile/creator/report/:reportLink/:recordId", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
     const recordId = (req.params.recordId || "").toString().trim();
@@ -1623,7 +1637,7 @@ app.patch("/mobile/creator/report/:reportLink/:recordId", requireMobileJwt, asyn
   }
 });
 
-app.delete("/mobile/creator/report/:reportLink/:recordId", requireMobileJwt, async (req, res) => {
+app.delete("/mobile/creator/report/:reportLink/:recordId", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
     const recordId = (req.params.recordId || "").toString().trim();
@@ -1637,7 +1651,7 @@ app.delete("/mobile/creator/report/:reportLink/:recordId", requireMobileJwt, asy
   }
 });
 
-app.get("/mobile/creator/customers", requireMobileJwt, async (req, res) => {
+app.get("/mobile/creator/customers", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = (process.env.ZOHO_CREATOR_CUSTOMERS_REPORT_LINK || "customers_Report").toString().trim();
     const data = await creatorGetReport(reportLink, req.query || {});
@@ -1648,7 +1662,7 @@ app.get("/mobile/creator/customers", requireMobileJwt, async (req, res) => {
   }
 });
 
-app.get("/mobile/creator/service-requests", requireMobileJwt, async (req, res) => {
+app.get("/mobile/creator/service-requests", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = (process.env.ZOHO_CREATOR_SERVICE_REQUESTS_REPORT_LINK || "service_requests_Report").toString().trim();
     const data = await creatorGetReport(reportLink, req.query || {});
@@ -1659,7 +1673,7 @@ app.get("/mobile/creator/service-requests", requireMobileJwt, async (req, res) =
   }
 });
 
-app.get("/mobile/creator/technicians", requireMobileJwt, async (req, res) => {
+app.get("/mobile/creator/technicians", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = (process.env.ZOHO_CREATOR_TECHNICIANS_REPORT_LINK || "technicians_Report").toString().trim();
     const data = await creatorGetReport(reportLink, req.query || {});
@@ -1670,7 +1684,7 @@ app.get("/mobile/creator/technicians", requireMobileJwt, async (req, res) => {
   }
 });
 
-app.get("/mobile/dashboard", requireMobileJwt, async (req, res) => {
+app.get("/mobile/dashboard", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const openOnlyCriteria = '(status != "Closed")';
     const techName = (req.mobileUser && req.mobileUser.name ? String(req.mobileUser.name) : "").trim();
