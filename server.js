@@ -1577,6 +1577,41 @@ function assertValidCreatorLinkName(value, label = "link") {
   return text;
 }
 
+function coerceQueryValue(value) {
+  const raw = (value || "").toString().trim();
+  if (raw === "") return "";
+  const lower = raw.toLowerCase();
+  if (lower === "true") return true;
+  if (lower === "false") return false;
+  if (/^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
+  if (raw.startsWith("json:")) {
+    const jsonText = raw.slice(5).trim();
+    try {
+      return JSON.parse(jsonText);
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
+}
+
+function buildCreatorDataFromQuery(queryObj = {}, skipKeys = []) {
+  const skip = new Set(skipKeys.map((k) => String(k).toLowerCase()));
+  const out = {};
+  Object.entries(queryObj || {}).forEach(([key, value]) => {
+    const k = String(key || "").trim();
+    if (!k) return;
+    if (skip.has(k.toLowerCase())) return;
+    if (Array.isArray(value)) {
+      out[k] = value.map((v) => coerceQueryValue(v));
+      return;
+    }
+    const coerced = coerceQueryValue(value);
+    if (coerced !== "") out[k] = coerced;
+  });
+  return out;
+}
+
 app.get("/mobile/creator/report/:reportLink", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
@@ -1619,6 +1654,25 @@ app.post("/mobile/creator/form/:formLink", requireMobileJwtOrApiKey, async (req,
   }
 });
 
+// GET alternative for create (for environments where POST body is unreliable)
+// Example:
+// GET /mobile/creator/form/customers/create?customer_id=C-100&phone=7015871158
+app.get("/mobile/creator/form/:formLink/create", requireMobileJwtOrApiKey, async (req, res) => {
+  try {
+    const formLink = assertValidCreatorLinkName(req.params.formLink, "formLink");
+    const createData = buildCreatorDataFromQuery(req.query, ["_"]);
+    if (!createData || Object.keys(createData).length === 0) {
+      return res.status(400).json({ ok: false, error: "Missing query fields for create." });
+    }
+    const data = await creatorCreateRecord(formLink, createData);
+    return res.json({ ok: true, form: formLink, method: "GET", data });
+  } catch (err) {
+    console.error("mobile-creator-record-create(get) error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to create Creator record." });
+  }
+});
+
 app.patch("/mobile/creator/report/:reportLink/:recordId", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
@@ -1637,6 +1691,27 @@ app.patch("/mobile/creator/report/:reportLink/:recordId", requireMobileJwtOrApiK
   }
 });
 
+// GET alternative for update
+// Example:
+// GET /mobile/creator/report/work_orders_Report/4879.../update?status=Completed
+app.get("/mobile/creator/report/:reportLink/:recordId/update", requireMobileJwtOrApiKey, async (req, res) => {
+  try {
+    const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
+    const recordId = (req.params.recordId || "").toString().trim();
+    assertValidCreatorPathParams(reportLink, recordId);
+    const updateData = buildCreatorDataFromQuery(req.query, ["recordId", "id"]);
+    if (!updateData || Object.keys(updateData).length === 0) {
+      return res.status(400).json({ ok: false, error: "Missing query fields for update." });
+    }
+    const data = await creatorUpdateRecord(reportLink, recordId, updateData);
+    return res.json({ ok: true, report: reportLink, recordId, method: "GET", data });
+  } catch (err) {
+    console.error("mobile-creator-record-update(get) error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to update Creator record." });
+  }
+});
+
 app.delete("/mobile/creator/report/:reportLink/:recordId", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
@@ -1646,6 +1721,23 @@ app.delete("/mobile/creator/report/:reportLink/:recordId", requireMobileJwtOrApi
     return res.json({ ok: true, report: reportLink, recordId, data });
   } catch (err) {
     console.error("mobile-creator-record-delete error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to delete Creator record." });
+  }
+});
+
+// GET alternative for delete
+// Example:
+// GET /mobile/creator/report/work_orders_Report/4879.../delete
+app.get("/mobile/creator/report/:reportLink/:recordId/delete", requireMobileJwtOrApiKey, async (req, res) => {
+  try {
+    const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
+    const recordId = (req.params.recordId || "").toString().trim();
+    assertValidCreatorPathParams(reportLink, recordId);
+    const data = await creatorDeleteRecord(reportLink, recordId);
+    return res.json({ ok: true, report: reportLink, recordId, method: "GET", data });
+  } catch (err) {
+    console.error("mobile-creator-record-delete(get) error:", err);
     const status = err.statusCode || 500;
     return res.status(status).json({ ok: false, error: err.message || "Failed to delete Creator record." });
   }
