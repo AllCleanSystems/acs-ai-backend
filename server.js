@@ -657,6 +657,41 @@ async function creatorUpdateRecord(reportLink, recordId, updateData) {
   return data;
 }
 
+async function zohoServiceGet(service, endpoint, queryParams = {}) {
+  const baseByService = {
+    books: "https://www.zohoapis.com/books/v3",
+    crm: "https://www.zohoapis.com/crm/v2"
+  };
+  const base = baseByService[service];
+  if (!base) {
+    throw new Error(`Unsupported Zoho service '${service}'.`);
+  }
+
+  const accessToken = await getZohoAccessToken();
+  const url = new URL(`${base}${endpoint}`);
+  Object.entries(queryParams || {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && String(value).trim() !== "") {
+      url.searchParams.set(key, String(value));
+    }
+  });
+
+  const response = await fetchWithRetry(
+    url.toString(),
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Zoho-oauthtoken ${accessToken}`
+      }
+    },
+    `zoho-${service}-get`
+  );
+  const data = await safeJson(response);
+  if (!response.ok) {
+    throw new Error(`Zoho ${service} GET error: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
 function shouldValidateTwilioRequests() {
   // If auth token isn't configured, skip validation (dev-friendly).
   // If it is configured, validate by default.
@@ -1286,6 +1321,186 @@ app.get("/mobile/work-orders", requireMobileJwt, async (req, res) => {
   } catch (err) {
     console.error("mobile-work-orders error:", err);
     return res.status(500).json({ ok: false, error: err.message || "Server error." });
+  }
+});
+
+app.get("/mobile/books/invoices", requireMobileJwt, async (req, res) => {
+  try {
+    const orgId = (process.env.ZOHO_BOOKS_ORGANIZATION_ID || "").toString().trim();
+    if (!orgId) {
+      return res.status(500).json({ ok: false, error: "ZOHO_BOOKS_ORGANIZATION_ID not configured." });
+    }
+
+    const { customer_id, status, page, per_page } = req.query || {};
+    const data = await zohoServiceGet("books", "/invoices", {
+      organization_id: orgId,
+      customer_id,
+      status,
+      page,
+      per_page
+    });
+    return res.json({ ok: true, items: data.invoices || [], page_context: data.page_context || {} });
+  } catch (err) {
+    console.error("mobile-books-invoices error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch Books invoices." });
+  }
+});
+
+app.get("/mobile/books/customers", requireMobileJwt, async (req, res) => {
+  try {
+    const orgId = (process.env.ZOHO_BOOKS_ORGANIZATION_ID || "").toString().trim();
+    if (!orgId) {
+      return res.status(500).json({ ok: false, error: "ZOHO_BOOKS_ORGANIZATION_ID not configured." });
+    }
+
+    const { page, per_page } = req.query || {};
+    const data = await zohoServiceGet("books", "/contacts", {
+      organization_id: orgId,
+      contact_type: "customer",
+      page,
+      per_page
+    });
+    return res.json({ ok: true, items: data.contacts || [], page_context: data.page_context || {} });
+  } catch (err) {
+    console.error("mobile-books-customers error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch Books customers." });
+  }
+});
+
+app.get("/mobile/books/estimates", requireMobileJwt, async (req, res) => {
+  try {
+    const orgId = (process.env.ZOHO_BOOKS_ORGANIZATION_ID || "").toString().trim();
+    if (!orgId) {
+      return res.status(500).json({ ok: false, error: "ZOHO_BOOKS_ORGANIZATION_ID not configured." });
+    }
+
+    const { customer_id, status, page, per_page } = req.query || {};
+    const data = await zohoServiceGet("books", "/estimates", {
+      organization_id: orgId,
+      customer_id,
+      status,
+      page,
+      per_page
+    });
+    return res.json({ ok: true, items: data.estimates || [], page_context: data.page_context || {} });
+  } catch (err) {
+    console.error("mobile-books-estimates error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch Books estimates." });
+  }
+});
+
+app.get("/mobile/crm/contacts", requireMobileJwt, async (req, res) => {
+  try {
+    const { page = 1, per_page = 50 } = req.query || {};
+    const data = await zohoServiceGet("crm", "/Contacts", { page, per_page });
+    return res.json({ ok: true, items: data.data || [], info: data.info || {} });
+  } catch (err) {
+    console.error("mobile-crm-contacts error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch CRM contacts." });
+  }
+});
+
+app.get("/mobile/crm/accounts", requireMobileJwt, async (req, res) => {
+  try {
+    const { page = 1, per_page = 50 } = req.query || {};
+    const data = await zohoServiceGet("crm", "/Accounts", { page, per_page });
+    return res.json({ ok: true, items: data.data || [], info: data.info || {} });
+  } catch (err) {
+    console.error("mobile-crm-accounts error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch CRM accounts." });
+  }
+});
+
+app.get("/mobile/crm/deals", requireMobileJwt, async (req, res) => {
+  try {
+    const { page = 1, per_page = 50 } = req.query || {};
+    const data = await zohoServiceGet("crm", "/Deals", { page, per_page });
+    return res.json({ ok: true, items: data.data || [], info: data.info || {} });
+  } catch (err) {
+    console.error("mobile-crm-deals error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch CRM deals." });
+  }
+});
+
+app.get("/mobile/crm/leads", requireMobileJwt, async (req, res) => {
+  try {
+    const { page = 1, per_page = 50 } = req.query || {};
+    const data = await zohoServiceGet("crm", "/Leads", { page, per_page });
+    return res.json({ ok: true, items: data.data || [], info: data.info || {} });
+  } catch (err) {
+    console.error("mobile-crm-leads error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch CRM leads." });
+  }
+});
+
+app.get("/mobile/creator/customers", requireMobileJwt, async (req, res) => {
+  try {
+    const reportLink = (process.env.ZOHO_CREATOR_CUSTOMERS_REPORT_LINK || "customers_Report").toString().trim();
+    const data = await creatorGetReport(reportLink, req.query || {});
+    return res.json({ ok: true, items: data.data || [] });
+  } catch (err) {
+    console.error("mobile-creator-customers error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch Creator customers." });
+  }
+});
+
+app.get("/mobile/creator/service-requests", requireMobileJwt, async (req, res) => {
+  try {
+    const reportLink = (process.env.ZOHO_CREATOR_SERVICE_REQUESTS_REPORT_LINK || "service_requests_Report").toString().trim();
+    const data = await creatorGetReport(reportLink, req.query || {});
+    return res.json({ ok: true, items: data.data || [] });
+  } catch (err) {
+    console.error("mobile-creator-service-requests error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch Creator service requests." });
+  }
+});
+
+app.get("/mobile/creator/technicians", requireMobileJwt, async (req, res) => {
+  try {
+    const reportLink = (process.env.ZOHO_CREATOR_TECHNICIANS_REPORT_LINK || "technicians_Report").toString().trim();
+    const data = await creatorGetReport(reportLink, req.query || {});
+    return res.json({ ok: true, items: data.data || [] });
+  } catch (err) {
+    console.error("mobile-creator-technicians error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch Creator technicians." });
+  }
+});
+
+app.get("/mobile/dashboard", requireMobileJwt, async (req, res) => {
+  try {
+    const openOnlyCriteria = '(status != "Closed")';
+    const techName = (req.mobileUser && req.mobileUser.name ? String(req.mobileUser.name) : "").trim();
+    const woCriteria = techName
+      ? `(assigned_tech.contains("${escapeCreatorCriteriaString(techName)}")) && ${openOnlyCriteria}`
+      : openOnlyCriteria;
+
+    const orgId = (process.env.ZOHO_BOOKS_ORGANIZATION_ID || "").toString().trim();
+
+    const [workOrders, invoices, contacts] = await Promise.allSettled([
+      creatorGetReport(
+        (process.env.ZOHO_CREATOR_WORK_ORDERS_REPORT_LINK || "work_orders_Report").toString().trim(),
+        { criteria: woCriteria, max_records: 10 }
+      ),
+      orgId
+        ? zohoServiceGet("books", "/invoices", {
+            organization_id: orgId,
+            per_page: 5,
+            sort_column: "date",
+            sort_order: "D"
+          })
+        : Promise.resolve({ invoices: [] }),
+      zohoServiceGet("crm", "/Contacts", { page: 1, per_page: 5 })
+    ]);
+
+    return res.json({
+      ok: true,
+      workOrders: workOrders.status === "fulfilled" ? (workOrders.value.data || []) : [],
+      recentInvoices: invoices.status === "fulfilled" ? (invoices.value.invoices || []) : [],
+      recentContacts: contacts.status === "fulfilled" ? (contacts.value.data || []) : []
+    });
+  } catch (err) {
+    console.error("mobile-dashboard error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch dashboard data." });
   }
 });
 
