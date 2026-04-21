@@ -1,10 +1,10 @@
-# FlutterFlow Email + Password Setup (Technicians)
+# FlutterFlow Password Setup (Technicians)
 
 This backend now supports password login without Twilio.
 
 ## Endpoints
 
-- `POST /mobile/auth/login`
+- `POST /mobile/auth/login` (supports email or phone)
 - `POST /mobile/auth/password/bootstrap` (admin/API key required)
 - `POST /mobile/auth/password/change` (JWT required)
 - `GET /mobile/me` (JWT required)
@@ -44,14 +44,35 @@ curl -X POST "https://<your-domain>/mobile/auth/password/bootstrap" \
   -d '{"email":"tech@allclean.com","password":"StrongPass123"}'
 ```
 
+You can also bootstrap by phone (useful if your technicians form has no email field):
+
+```bash
+curl -X POST "https://<your-domain>/mobile/auth/password/bootstrap" \
+  -H "Content-Type: application/json" \
+  -H "x-acs-key: <FF_API_KEY>" \
+  -d '{"phone":"+17015551234","password":"StrongPass123"}'
+```
+
 ## 4) Login (FlutterFlow)
 
 Request:
+
+Use email:
 
 ```json
 POST /mobile/auth/login
 {
   "email": "tech@allclean.com",
+  "password": "StrongPass123"
+}
+```
+
+Or use phone:
+
+```json
+POST /mobile/auth/login
+{
+  "phone": "+17015551234",
   "password": "StrongPass123"
 }
 ```

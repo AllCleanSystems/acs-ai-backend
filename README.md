@@ -15,7 +15,7 @@ This is the starter backend for:
 3. Test:
    - `GET /`
    - `GET /health`
-   - `POST /mobile/auth/login` (Email + Password -> JWT)
+   - `POST /mobile/auth/login` (Email/Phone + Password -> JWT)
    - `POST /api/ai/create-intake`
    - `POST /mobile/auth/start`  (Twilio Verify OTP)
    - `POST /mobile/auth/verify` (Twilio Verify OTP -> JWT)

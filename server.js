@@ -1007,12 +1007,15 @@ app.get("/health", (req, res) => {
 app.post("/mobile/auth/login", async (req, res) => {
   try {
     const email = normalizeEmail(req.body && req.body.email);
+    const phoneRaw = (req.body && req.body.phone ? String(req.body.phone) : "").trim();
+    const hasEmail = isValidEmailAddress(email);
+    const phoneE164 = phoneRaw ? normalizePhoneToE164(phoneRaw) : "";
     const password = req.body && req.body.password ? String(req.body.password) : "";
-    if (!isValidEmailAddress(email) || !password) {
-      return res.status(400).json({ ok: false, error: "email and password are required." });
+    if ((!hasEmail && !phoneE164) || !password) {
+      return res.status(400).json({ ok: false, error: "email or phone and password are required." });
     }
 
-    const loginKey = `email:${email}`;
+    const loginKey = hasEmail ? `email:${email}` : `phone:${phoneE164}`;
     const lockRemaining = mobileLockoutRemainingMs(loginKey);
     if (lockRemaining > 0) {
       return res.status(429).json({
@@ -1021,12 +1024,18 @@ app.post("/mobile/auth/login", async (req, res) => {
       });
     }
 
-    const tech = await findTechnicianByEmail(email);
+    let tech = null;
+    if (hasEmail) {
+      tech = await findTechnicianByEmail(email);
+    }
+    if (!tech && phoneE164) {
+      tech = await findTechnicianByPhone(phoneE164);
+    }
     if (!tech) {
       registerMobileLoginFailure(loginKey);
       // Small delay to reduce user enumeration signal.
       await sleep(250);
-      return res.status(401).json({ ok: false, error: "Invalid email or password." });
+      return res.status(401).json({ ok: false, error: "Invalid credentials." });
     }
 
     const activeField = getTechnicianActiveFieldLink();
@@ -1050,14 +1059,14 @@ app.post("/mobile/auth/login", async (req, res) => {
     if (!matched) {
       registerMobileLoginFailure(loginKey);
       await sleep(250);
-      return res.status(401).json({ ok: false, error: "Invalid email or password." });
+      return res.status(401).json({ ok: false, error: "Invalid credentials." });
     }
 
     clearMobileLoginFailures(loginKey);
     const identity = extractTechnicianIdentity(tech);
     const token = issueMobileJwt({
       techId: identity.techId,
-      phoneE164: identity.phoneE164,
+      phoneE164: phoneE164 || identity.phoneE164,
       role: identity.role,
       displayName: identity.name
     });
@@ -1157,15 +1166,24 @@ app.post("/mobile/auth/verify", async (req, res) => {
 app.post("/mobile/auth/password/bootstrap", requireFlutterFlowApiKey, async (req, res) => {
   try {
     const email = normalizeEmail(req.body && req.body.email);
+    const phoneRaw = (req.body && req.body.phone ? String(req.body.phone) : "").trim();
+    const hasEmail = isValidEmailAddress(email);
+    const phoneE164 = phoneRaw ? normalizePhoneToE164(phoneRaw) : "";
     const password = req.body && req.body.password ? String(req.body.password) : "";
-    if (!isValidEmailAddress(email) || !password) {
-      return res.status(400).json({ ok: false, error: "email and password are required." });
+    if ((!hasEmail && !phoneE164) || !password) {
+      return res.status(400).json({ ok: false, error: "email or phone and password are required." });
     }
     validateNewMobilePassword(password);
 
-    const tech = await findTechnicianByEmail(email);
+    let tech = null;
+    if (hasEmail) {
+      tech = await findTechnicianByEmail(email);
+    }
+    if (!tech && phoneE164) {
+      tech = await findTechnicianByPhone(phoneE164);
+    }
     if (!tech) {
-      return res.status(404).json({ ok: false, error: "Technician not found for email." });
+      return res.status(404).json({ ok: false, error: "Technician not found for email/phone." });
     }
 
     const reportLink = (process.env.ZOHO_CREATOR_TECHNICIANS_REPORT_LINK || "technicians_Report").toString().trim();
@@ -1183,7 +1201,8 @@ app.post("/mobile/auth/password/bootstrap", requireFlutterFlowApiKey, async (req
     return res.json({
       ok: true,
       tech_id: String(tech.ID),
-      email,
+      email: hasEmail ? email : "",
+      phone: phoneE164,
       updated_fields: Object.keys(updateData)
     });
   } catch (err) {
