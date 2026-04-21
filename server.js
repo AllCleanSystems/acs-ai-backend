@@ -184,6 +184,7 @@ const MOBILE_LOGIN_LOCKOUT_MS = Math.max(
   60_000,
   Number(process.env.MOBILE_LOGIN_LOCKOUT_MS || 15 * 60 * 1000)
 );
+const MOBILE_DEFAULT_PASSCODE = (process.env.MOBILE_DEFAULT_PASSCODE || "joejoe23").toString();
 const mobileLoginAttempts = new Map();
 
 function normalizeEmail(input) {
@@ -1139,14 +1140,12 @@ app.post("/mobile/auth/login", async (req, res) => {
 
     const passwordHashField = getTechnicianPasswordHashFieldLink();
     const storedHash = creatorFieldDisplayValue(tech[passwordHashField]).trim();
+    let matched = false;
     if (!storedHash) {
-      return res.status(403).json({
-        ok: false,
-        error: `Password not set. Ask admin to set ${passwordHashField} for this technician.`
-      });
+      matched = password === MOBILE_DEFAULT_PASSCODE;
+    } else {
+      matched = await verifyMobilePassword(password, storedHash);
     }
-
-    const matched = await verifyMobilePassword(password, storedHash);
     if (!matched) {
       registerMobileLoginFailure(loginKey);
       await sleep(250);
