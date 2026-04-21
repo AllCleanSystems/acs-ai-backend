@@ -657,6 +657,61 @@ async function creatorUpdateRecord(reportLink, recordId, updateData) {
   return data;
 }
 
+async function creatorCreateRecord(formLink, createData) {
+  const accessToken = await getZohoAccessToken();
+  const { owner, appLink } = creatorOwnerAndApp();
+  const url = new URL(
+    `${creatorBaseUrl()}/creator/v2.1/data/${encodeURIComponent(owner)}/${encodeURIComponent(appLink)}/form/${encodeURIComponent(
+      formLink
+    )}`
+  );
+
+  const body = { data: createData };
+  const response = await fetchWithRetry(
+    url.toString(),
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Zoho-oauthtoken ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    },
+    "zoho-creator-record-post"
+  );
+  const data = await safeJson(response);
+  if (!response.ok) {
+    throw new Error(`Zoho Creator record POST error: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
+async function creatorDeleteRecord(reportLink, recordId) {
+  const accessToken = await getZohoAccessToken();
+  const { owner, appLink } = creatorOwnerAndApp();
+  const url = new URL(
+    `${creatorBaseUrl()}/creator/v2.1/data/${encodeURIComponent(owner)}/${encodeURIComponent(appLink)}/report/${encodeURIComponent(
+      reportLink
+    )}/${encodeURIComponent(String(recordId))}`
+  );
+
+  const response = await fetchWithRetry(
+    url.toString(),
+    {
+      method: "DELETE",
+      headers: {
+        Authorization: `Zoho-oauthtoken ${accessToken}`
+      }
+    },
+    "zoho-creator-record-delete"
+  );
+  const data = await safeJson(response);
+  if (!response.ok) {
+    throw new Error(`Zoho Creator record DELETE error: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
 async function zohoServiceGet(service, endpoint, queryParams = {}) {
   const baseByService = {
     books: "https://www.zohoapis.com/books/v3",
@@ -1491,6 +1546,90 @@ app.get("/mobile/fsm/service-appointments", requireMobileJwt, async (req, res) =
   } catch (err) {
     console.error("mobile-fsm-service-appointments error:", err);
     return res.status(500).json({ ok: false, error: err.message || "Failed to fetch FSM service appointments." });
+  }
+});
+
+function assertValidCreatorLinkName(value, label = "link") {
+  const text = (value || "").toString().trim();
+  if (!text || !/^[A-Za-z0-9_]+$/.test(text) || text.includes("{") || text.includes("}")) {
+    const err = new Error(`Invalid ${label} '${text}'. Use Creator link name (letters/numbers/underscore only).`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return text;
+}
+
+app.get("/mobile/creator/report/:reportLink", requireMobileJwt, async (req, res) => {
+  try {
+    const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
+    const data = await creatorGetReport(reportLink, req.query || {});
+    return res.json({ ok: true, report: reportLink, items: data.data || [], raw: data });
+  } catch (err) {
+    console.error("mobile-creator-report-get error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to fetch Creator report." });
+  }
+});
+
+app.get("/mobile/creator/report/:reportLink/:recordId", requireMobileJwt, async (req, res) => {
+  try {
+    const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
+    const recordId = (req.params.recordId || "").toString().trim();
+    assertValidCreatorPathParams(reportLink, recordId);
+    const data = await creatorGetRecord(reportLink, recordId);
+    return res.json({ ok: true, report: reportLink, recordId, data });
+  } catch (err) {
+    console.error("mobile-creator-record-get error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to fetch Creator record." });
+  }
+});
+
+app.post("/mobile/creator/form/:formLink", requireMobileJwt, async (req, res) => {
+  try {
+    const formLink = assertValidCreatorLinkName(req.params.formLink, "formLink");
+    const createData = req.body && typeof req.body === "object" ? (req.body.data || req.body) : null;
+    if (!createData || typeof createData !== "object") {
+      return res.status(400).json({ ok: false, error: "Missing JSON body. Send { data: { field: value } }." });
+    }
+    const data = await creatorCreateRecord(formLink, createData);
+    return res.json({ ok: true, form: formLink, data });
+  } catch (err) {
+    console.error("mobile-creator-record-post error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to create Creator record." });
+  }
+});
+
+app.patch("/mobile/creator/report/:reportLink/:recordId", requireMobileJwt, async (req, res) => {
+  try {
+    const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
+    const recordId = (req.params.recordId || "").toString().trim();
+    assertValidCreatorPathParams(reportLink, recordId);
+    const updateData = req.body && typeof req.body === "object" ? (req.body.data || req.body) : null;
+    if (!updateData || typeof updateData !== "object") {
+      return res.status(400).json({ ok: false, error: "Missing JSON body. Send { data: { field: value } }." });
+    }
+    const data = await creatorUpdateRecord(reportLink, recordId, updateData);
+    return res.json({ ok: true, report: reportLink, recordId, data });
+  } catch (err) {
+    console.error("mobile-creator-record-patch error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to update Creator record." });
+  }
+});
+
+app.delete("/mobile/creator/report/:reportLink/:recordId", requireMobileJwt, async (req, res) => {
+  try {
+    const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
+    const recordId = (req.params.recordId || "").toString().trim();
+    assertValidCreatorPathParams(reportLink, recordId);
+    const data = await creatorDeleteRecord(reportLink, recordId);
+    return res.json({ ok: true, report: reportLink, recordId, data });
+  } catch (err) {
+    console.error("mobile-creator-record-delete error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to delete Creator record." });
   }
 });
 
