@@ -156,6 +156,16 @@ function issueMobileJwt({ techId, phoneE164, role, displayName }) {
 
 function requireMobileJwt(req, res, next) {
   try {
+    const requiredApiKey = (process.env.FF_API_KEY || "").toString().trim();
+    const providedApiKey = ((req.get("x-acs-key") || req.query.api_key || "") + "").toString().trim();
+    const allowApiKeyBypass = ((process.env.MOBILE_ALLOW_API_KEY_BYPASS || "true") + "").toString().trim().toLowerCase();
+    const apiKeyBypassEnabled = allowApiKeyBypass !== "false" && allowApiKeyBypass !== "0" && allowApiKeyBypass !== "no";
+    if (apiKeyBypassEnabled && requiredApiKey && providedApiKey && providedApiKey === requiredApiKey) {
+      req.mobileUser = req.mobileUser || {};
+      req.mobileAuthMode = "api_key";
+      return next();
+    }
+
     const header = (req.get("authorization") || "").toString();
     const token = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : "";
     if (!token) {
