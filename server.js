@@ -603,6 +603,11 @@ async function creatorGetReport(reportLink, query = {}) {
   );
   const data = await safeJson(response);
   if (!response.ok) {
+    // Zoho Creator returns code 9280 when no records match criteria.
+    // Treat this as an empty result set so callers can handle "not found" gracefully.
+    if (data && String(data.code) === "9280") {
+      return { code: 3000, data: [], info: { count: 0 } };
+    }
     throw new Error(`Zoho Creator report GET error: ${JSON.stringify(data)}`);
   }
   return data;
