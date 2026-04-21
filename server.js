@@ -920,7 +920,7 @@ function creatorFieldDisplayValue(fieldValue) {
 async function findTechnicianByPhone(phoneE164) {
   const reportLink = (process.env.ZOHO_CREATOR_TECHNICIANS_REPORT_LINK || "technicians_Report").toString().trim();
   const criteria = `phone == "${escapeCreatorCriteriaString(phoneE164)}"`;
-  const data = await creatorGetReport(reportLink, { criteria, page: 1, per_page: 1, max_records: 1 });
+  const data = await creatorGetReport(reportLink, { criteria });
   const rows = data && Array.isArray(data.data) ? data.data : [];
   return rows[0] || null;
 }
@@ -933,7 +933,7 @@ async function findTechnicianByEmail(email) {
   const attempts = raw && raw !== normalized ? [normalized, raw] : [normalized];
   for (const value of attempts) {
     const criteria = `${emailField} == "${escapeCreatorCriteriaString(value)}"`;
-    const data = await creatorGetReport(reportLink, { criteria, page: 1, per_page: 1, max_records: 1 });
+    const data = await creatorGetReport(reportLink, { criteria });
     const rows = data && Array.isArray(data.data) ? data.data : [];
     if (rows.length > 0) {
       return rows[0];
@@ -949,7 +949,7 @@ async function findTechnicianById(techId) {
   }
   const reportLink = (process.env.ZOHO_CREATOR_TECHNICIANS_REPORT_LINK || "technicians_Report").toString().trim();
   const criteria = `ID == ${id}`;
-  const data = await creatorGetReport(reportLink, { criteria, page: 1, per_page: 1, max_records: 1 });
+  const data = await creatorGetReport(reportLink, { criteria });
   const rows = data && Array.isArray(data.data) ? data.data : [];
   return rows[0] || null;
 }
