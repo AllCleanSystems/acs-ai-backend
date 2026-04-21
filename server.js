@@ -919,12 +919,41 @@ function creatorFieldDisplayValue(fieldValue) {
   return "";
 }
 
+function isZohoNoRecordsError(error) {
+  const msg = (error && error.message ? String(error.message) : "").toLowerCase();
+  return msg.includes('"code":9280') || msg.includes("no records found matching the given criteria");
+}
+
 async function findTechnicianByPhone(phoneE164) {
   const reportLink = (process.env.ZOHO_CREATOR_TECHNICIANS_REPORT_LINK || "technicians_Report").toString().trim();
-  const criteria = `phone == "${escapeCreatorCriteriaString(phoneE164)}"`;
-  const data = await creatorGetReport(reportLink, { criteria });
-  const rows = data && Array.isArray(data.data) ? data.data : [];
-  return rows[0] || null;
+  const digits = String(phoneE164 || "").replace(/\D/g, "");
+  const last10 = digits.length >= 10 ? digits.slice(-10) : "";
+  const criteriaAttempts = [`phone == "${escapeCreatorCriteriaString(phoneE164)}"`];
+  if (digits) {
+    criteriaAttempts.push(`phone == "${escapeCreatorCriteriaString(digits)}"`);
+  }
+  if (last10 && last10 !== digits) {
+    criteriaAttempts.push(`phone == "${escapeCreatorCriteriaString(last10)}"`);
+  }
+  if (last10) {
+    criteriaAttempts.push(`phone.contains("${escapeCreatorCriteriaString(last10)}")`);
+  }
+
+  for (const criteria of criteriaAttempts) {
+    try {
+      const data = await creatorGetReport(reportLink, { criteria });
+      const rows = data && Array.isArray(data.data) ? data.data : [];
+      if (rows.length > 0) {
+        return rows[0];
+      }
+    } catch (err) {
+      if (isZohoNoRecordsError(err)) {
+        continue;
+      }
+      throw err;
+    }
+  }
+  return null;
 }
 
 async function findTechnicianByEmail(email) {
@@ -935,10 +964,17 @@ async function findTechnicianByEmail(email) {
   const attempts = raw && raw !== normalized ? [normalized, raw] : [normalized];
   for (const value of attempts) {
     const criteria = `${emailField} == "${escapeCreatorCriteriaString(value)}"`;
-    const data = await creatorGetReport(reportLink, { criteria });
-    const rows = data && Array.isArray(data.data) ? data.data : [];
-    if (rows.length > 0) {
-      return rows[0];
+    try {
+      const data = await creatorGetReport(reportLink, { criteria });
+      const rows = data && Array.isArray(data.data) ? data.data : [];
+      if (rows.length > 0) {
+        return rows[0];
+      }
+    } catch (err) {
+      if (isZohoNoRecordsError(err)) {
+        continue;
+      }
+      throw err;
     }
   }
   return null;
@@ -951,9 +987,16 @@ async function findTechnicianById(techId) {
   }
   const reportLink = (process.env.ZOHO_CREATOR_TECHNICIANS_REPORT_LINK || "technicians_Report").toString().trim();
   const criteria = `ID == ${id}`;
-  const data = await creatorGetReport(reportLink, { criteria });
-  const rows = data && Array.isArray(data.data) ? data.data : [];
-  return rows[0] || null;
+  try {
+    const data = await creatorGetReport(reportLink, { criteria });
+    const rows = data && Array.isArray(data.data) ? data.data : [];
+    return rows[0] || null;
+  } catch (err) {
+    if (isZohoNoRecordsError(err)) {
+      return null;
+    }
+    throw err;
+  }
 }
 
 function extractTechnicianIdentity(tech) {
