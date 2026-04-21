@@ -5,7 +5,6 @@ const fetch = require("node-fetch");
 const OpenAI = require("openai");
 const twilio = require("twilio");
 const crypto = require("crypto");
-const adminAuthRoutes = require('./routes/admin-auth');
 
 dotenv.config();
 
@@ -21,7 +20,6 @@ app.use(cors());
 // Twilio sends webhooks as application/x-www-form-urlencoded
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
-const adminAuthRoutes = require('./routes/admin-auth');
 
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
