@@ -4,6 +4,9 @@
   "private": true,
   "description": "Backend bridge for ACS Control Center website chat, OpenAI, and Zoho Creator.",
   "main": "server.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node server.js"
   },
