@@ -660,7 +660,8 @@ async function creatorUpdateRecord(reportLink, recordId, updateData) {
 async function zohoServiceGet(service, endpoint, queryParams = {}) {
   const baseByService = {
     books: "https://www.zohoapis.com/books/v3",
-    crm: "https://www.zohoapis.com/crm/v2"
+    crm: "https://www.zohoapis.com/crm/v2",
+    fsm: (process.env.ZOHO_FSM_BASE_URL || "https://fsm.zoho.com/fsm/v1").replace(/\/+$/, "")
   };
   const base = baseByService[service];
   if (!base) {
@@ -1430,6 +1431,66 @@ app.get("/mobile/crm/leads", requireMobileJwt, async (req, res) => {
   } catch (err) {
     console.error("mobile-crm-leads error:", err);
     return res.status(500).json({ ok: false, error: err.message || "Failed to fetch CRM leads." });
+  }
+});
+
+app.get("/mobile/fsm/work-orders", requireMobileJwt, async (req, res) => {
+  try {
+    const { page, per_page, status } = req.query || {};
+    const data = await zohoServiceGet("fsm", "/Work_Orders", { page, per_page, status });
+    const items =
+      (data && Array.isArray(data.data) && data.data) ||
+      (data && Array.isArray(data.Work_Orders) && data.Work_Orders) ||
+      [];
+    return res.json({ ok: true, items, raw: data });
+  } catch (err) {
+    console.error("mobile-fsm-work-orders error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch FSM work orders." });
+  }
+});
+
+app.get("/mobile/fsm/requests", requireMobileJwt, async (req, res) => {
+  try {
+    const { page, per_page, status } = req.query || {};
+    const data = await zohoServiceGet("fsm", "/Requests", { page, per_page, status });
+    const items =
+      (data && Array.isArray(data.data) && data.data) ||
+      (data && Array.isArray(data.Requests) && data.Requests) ||
+      [];
+    return res.json({ ok: true, items, raw: data });
+  } catch (err) {
+    console.error("mobile-fsm-requests error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch FSM requests." });
+  }
+});
+
+app.get("/mobile/fsm/contacts", requireMobileJwt, async (req, res) => {
+  try {
+    const { page, per_page } = req.query || {};
+    const data = await zohoServiceGet("fsm", "/Contacts", { page, per_page });
+    const items =
+      (data && Array.isArray(data.data) && data.data) ||
+      (data && Array.isArray(data.Contacts) && data.Contacts) ||
+      [];
+    return res.json({ ok: true, items, raw: data });
+  } catch (err) {
+    console.error("mobile-fsm-contacts error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch FSM contacts." });
+  }
+});
+
+app.get("/mobile/fsm/service-appointments", requireMobileJwt, async (req, res) => {
+  try {
+    const { page, per_page, status } = req.query || {};
+    const data = await zohoServiceGet("fsm", "/Service_Appointments", { page, per_page, status });
+    const items =
+      (data && Array.isArray(data.data) && data.data) ||
+      (data && Array.isArray(data.Service_Appointments) && data.Service_Appointments) ||
+      [];
+    return res.json({ ok: true, items, raw: data });
+  } catch (err) {
+    console.error("mobile-fsm-service-appointments error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to fetch FSM service appointments." });
   }
 });
 
