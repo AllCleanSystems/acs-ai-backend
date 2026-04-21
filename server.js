@@ -154,16 +154,39 @@ function issueMobileJwt({ techId, phoneE164, role, displayName }) {
   return signJwtHs256(payload, secret);
 }
 
+function extractApiKeyFromRequest(req) {
+  const candidate =
+    (req.get("x-acs-key") ||
+      req.get("x-api-key") ||
+      req.query.api_key ||
+      req.query.ff_api_key ||
+      req.get("authorization") ||
+      "") + "";
+  const text = candidate.toString().trim();
+  return text.toLowerCase().startsWith("bearer ") ? text.slice(7).trim() : text;
+}
+
 function requireMobileJwt(req, res, next) {
   try {
+    const allowNoAuth = ((process.env.MOBILE_ALLOW_NO_AUTH || "false") + "").toString().trim().toLowerCase();
+    const noAuthEnabled = allowNoAuth === "true" || allowNoAuth === "1" || allowNoAuth === "yes";
+    if (noAuthEnabled) {
+      req.mobileUser = req.mobileUser || {};
+      req.mobileAuthMode = "no_auth";
+      return next();
+    }
+
     const requiredApiKey = (process.env.FF_API_KEY || "").toString().trim();
-    const providedApiKey = ((req.get("x-acs-key") || req.query.api_key || "") + "").toString().trim();
+    const providedApiKey = extractApiKeyFromRequest(req);
     const allowApiKeyBypass = ((process.env.MOBILE_ALLOW_API_KEY_BYPASS || "true") + "").toString().trim().toLowerCase();
     const apiKeyBypassEnabled = allowApiKeyBypass !== "false" && allowApiKeyBypass !== "0" && allowApiKeyBypass !== "no";
-    if (apiKeyBypassEnabled && requiredApiKey && providedApiKey && providedApiKey === requiredApiKey) {
-      req.mobileUser = req.mobileUser || {};
-      req.mobileAuthMode = "api_key";
-      return next();
+    if (apiKeyBypassEnabled && providedApiKey) {
+      if (!requiredApiKey || providedApiKey === requiredApiKey) {
+        req.mobileUser = req.mobileUser || {};
+        req.mobileAuthMode = "api_key";
+        return next();
+      }
+      return res.status(401).json({ ok: false, error: "Invalid API key." });
     }
 
     const header = (req.get("authorization") || "").toString();
@@ -189,7 +212,7 @@ function requireMobileJwt(req, res, next) {
 // Keep sensitive auth/account endpoints on JWT-only.
 function requireMobileJwtOrApiKey(req, res, next) {
   const requiredApiKey = (process.env.FF_API_KEY || "").toString().trim();
-  const providedApiKey = (req.get("x-acs-key") || "").toString().trim();
+  const providedApiKey = extractApiKeyFromRequest(req);
   if (requiredApiKey && providedApiKey && providedApiKey === requiredApiKey) {
     req.mobileUser = req.mobileUser || {};
     req.mobileAuthMode = "api_key";
@@ -559,8 +582,7 @@ function requireFlutterFlowApiKey(req, res, next) {
   if (!required) {
     return res.status(500).json({ ok: false, error: "Server missing FF_API_KEY." });
   }
-  const provided = (req.get("x-acs-key") || req.get("authorization") || "").toString().trim();
-  const token = provided.toLowerCase().startsWith("bearer ") ? provided.slice(7).trim() : provided;
+  const token = extractApiKeyFromRequest(req);
   if (!token || token !== required) {
     return res.status(401).json({ ok: false, error: "Unauthorized." });
   }
