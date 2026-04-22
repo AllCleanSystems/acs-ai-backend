@@ -1746,8 +1746,8 @@ app.get("/mobile/creator/report/:reportLink/:recordId/update", requireMobileJwtO
 
 // GET alternative for update using query recordId (avoids FlutterFlow path-variable issues)
 // Example:
-// GET /mobile/creator/report/work_orders_Report/update?recordId=4879...&status=Completed
-app.get("/mobile/creator/report/:reportLink/update", requireMobileJwtOrApiKey, async (req, res) => {
+// GET /mobile/creator/report/work_orders_Report/update-by-id?recordId=4879...&status=Completed
+app.get("/mobile/creator/report/:reportLink/update-by-id", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
     const recordId = ((req.query.recordId || req.query.id || "") + "").toString().trim();
@@ -1798,8 +1798,8 @@ app.get("/mobile/creator/report/:reportLink/:recordId/delete", requireMobileJwtO
 
 // GET alternative for delete using query recordId (avoids FlutterFlow path-variable issues)
 // Example:
-// GET /mobile/creator/report/work_orders_Report/delete?recordId=4879...
-app.get("/mobile/creator/report/:reportLink/delete", requireMobileJwtOrApiKey, async (req, res) => {
+// GET /mobile/creator/report/work_orders_Report/delete-by-id?recordId=4879...
+app.get("/mobile/creator/report/:reportLink/delete-by-id", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
     const recordId = ((req.query.recordId || req.query.id || "") + "").toString().trim();
