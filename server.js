@@ -1813,6 +1813,43 @@ app.get("/mobile/creator/report/:reportLink/delete-by-id", requireMobileJwtOrApi
   }
 });
 
+// Conflict-proof query-based routes (preferred for FlutterFlow)
+// Example:
+// GET /mobile/creator/report-update/work_orders_Report?recordId=4879...&status=Completed
+app.get("/mobile/creator/report-update/:reportLink", requireMobileJwtOrApiKey, async (req, res) => {
+  try {
+    const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
+    const recordId = ((req.query.recordId || req.query.id || "") + "").toString().trim();
+    assertValidCreatorPathParams(reportLink, recordId);
+    const updateData = buildCreatorDataFromQuery(req.query, ["recordId", "id", "api_key", "ff_api_key"]);
+    if (!updateData || Object.keys(updateData).length === 0) {
+      return res.status(400).json({ ok: false, error: "Missing query fields for update." });
+    }
+    const data = await creatorUpdateRecord(reportLink, recordId, updateData);
+    return res.json({ ok: true, report: reportLink, recordId, method: "GET", data });
+  } catch (err) {
+    console.error("mobile-creator-record-update(conflict-proof) error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to update Creator record." });
+  }
+});
+
+// Example:
+// GET /mobile/creator/report-delete/work_orders_Report?recordId=4879...
+app.get("/mobile/creator/report-delete/:reportLink", requireMobileJwtOrApiKey, async (req, res) => {
+  try {
+    const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
+    const recordId = ((req.query.recordId || req.query.id || "") + "").toString().trim();
+    assertValidCreatorPathParams(reportLink, recordId);
+    const data = await creatorDeleteRecord(reportLink, recordId);
+    return res.json({ ok: true, report: reportLink, recordId, method: "GET", data });
+  } catch (err) {
+    console.error("mobile-creator-record-delete(conflict-proof) error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to delete Creator record." });
+  }
+});
+
 app.get("/mobile/creator/customers", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = (process.env.ZOHO_CREATOR_CUSTOMERS_REPORT_LINK || "customers_Report").toString().trim();
