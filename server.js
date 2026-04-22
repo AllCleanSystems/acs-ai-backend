@@ -1744,6 +1744,27 @@ app.get("/mobile/creator/report/:reportLink/:recordId/update", requireMobileJwtO
   }
 });
 
+// GET alternative for update using query recordId (avoids FlutterFlow path-variable issues)
+// Example:
+// GET /mobile/creator/report/work_orders_Report/update?recordId=4879...&status=Completed
+app.get("/mobile/creator/report/:reportLink/update", requireMobileJwtOrApiKey, async (req, res) => {
+  try {
+    const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
+    const recordId = ((req.query.recordId || req.query.id || "") + "").toString().trim();
+    assertValidCreatorPathParams(reportLink, recordId);
+    const updateData = buildCreatorDataFromQuery(req.query, ["recordId", "id", "api_key", "ff_api_key"]);
+    if (!updateData || Object.keys(updateData).length === 0) {
+      return res.status(400).json({ ok: false, error: "Missing query fields for update." });
+    }
+    const data = await creatorUpdateRecord(reportLink, recordId, updateData);
+    return res.json({ ok: true, report: reportLink, recordId, method: "GET", data });
+  } catch (err) {
+    console.error("mobile-creator-record-update(get-query) error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to update Creator record." });
+  }
+});
+
 app.delete("/mobile/creator/report/:reportLink/:recordId", requireMobileJwtOrApiKey, async (req, res) => {
   try {
     const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
@@ -1770,6 +1791,23 @@ app.get("/mobile/creator/report/:reportLink/:recordId/delete", requireMobileJwtO
     return res.json({ ok: true, report: reportLink, recordId, method: "GET", data });
   } catch (err) {
     console.error("mobile-creator-record-delete(get) error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to delete Creator record." });
+  }
+});
+
+// GET alternative for delete using query recordId (avoids FlutterFlow path-variable issues)
+// Example:
+// GET /mobile/creator/report/work_orders_Report/delete?recordId=4879...
+app.get("/mobile/creator/report/:reportLink/delete", requireMobileJwtOrApiKey, async (req, res) => {
+  try {
+    const reportLink = assertValidCreatorLinkName(req.params.reportLink, "reportLink");
+    const recordId = ((req.query.recordId || req.query.id || "") + "").toString().trim();
+    assertValidCreatorPathParams(reportLink, recordId);
+    const data = await creatorDeleteRecord(reportLink, recordId);
+    return res.json({ ok: true, report: reportLink, recordId, method: "GET", data });
+  } catch (err) {
+    console.error("mobile-creator-record-delete(get-query) error:", err);
     const status = err.statusCode || 500;
     return res.status(status).json({ ok: false, error: err.message || "Failed to delete Creator record." });
   }
