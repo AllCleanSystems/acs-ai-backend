@@ -1958,6 +1958,45 @@ app.get("/mobile/kpi-counts", requireMobileJwtOrApiKey, async (req, res) => {
   }
 });
 
+app.get("/mobile/sync-health", requireMobileJwtOrApiKey, async (req, res) => {
+  try {
+    const orgId = (process.env.ZOHO_BOOKS_ORGANIZATION_ID || "").toString().trim();
+    const customersReport = (process.env.ZOHO_CREATOR_CUSTOMERS_REPORT_LINK || "customers_Report").toString().trim();
+
+    const checks = await Promise.allSettled([
+      creatorGetReport(customersReport, { max_records: 200 }), // 0: creator + sync error count source
+      orgId ? zohoServiceGet("books", "/contacts", { organization_id: orgId, per_page: 1 }) : Promise.reject(new Error("ZOHO_BOOKS_ORGANIZATION_ID missing")),
+      zohoServiceGet("crm", "/Contacts", { page: 1, per_page: 1 }),
+      zohoServiceGet("fsm", "/Work_Orders", { page: 1, per_page: 1 })
+    ]);
+
+    const creatorOk = checks[0].status === "fulfilled";
+    const creatorRows = creatorOk && Array.isArray(checks[0].value && checks[0].value.data) ? checks[0].value.data : [];
+    const syncErrorsCount = creatorRows.filter((c) => String((c && c.sync_status) || "").toLowerCase() === "error").length;
+
+    const booksOk = checks[1].status === "fulfilled";
+    const crmOk = checks[2].status === "fulfilled";
+    const fsmOk = checks[3].status === "fulfilled";
+
+    const creatorStatus = !creatorOk ? "error" : syncErrorsCount > 0 ? "warning" : "healthy";
+    const booksStatus = booksOk ? "healthy" : "error";
+    const crmStatus = crmOk ? "healthy" : "error";
+    const fsmStatus = fsmOk ? "healthy" : "error";
+
+    return res.json({
+      ok: true,
+      creator: { status: creatorStatus, syncErrorsCount },
+      books: { status: booksStatus, configured: !!orgId },
+      crm: { status: crmStatus },
+      fsm: { status: fsmStatus }
+    });
+  } catch (err) {
+    console.error("mobile-sync-health error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to fetch sync health." });
+  }
+});
+
 // ----------------------------
 // FlutterFlow wrapper endpoints
 // ----------------------------
