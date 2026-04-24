@@ -1921,6 +1921,43 @@ app.get("/mobile/dashboard", requireMobileJwtOrApiKey, async (req, res) => {
   }
 });
 
+app.get("/mobile/kpi-counts", requireMobileJwtOrApiKey, async (req, res) => {
+  try {
+    const workOrdersReport = (process.env.ZOHO_CREATOR_WORK_ORDERS_REPORT_LINK || "work_orders_Report").toString().trim();
+    const serviceRequestsReport = (process.env.ZOHO_CREATOR_SERVICE_REQUESTS_REPORT_LINK || "service_requests_Report")
+      .toString()
+      .trim();
+    const invoicesReport = (process.env.ZOHO_CREATOR_INVOICES_REPORT_LINK || "invoices_Report").toString().trim();
+    const customersReport = (process.env.ZOHO_CREATOR_CUSTOMERS_REPORT_LINK || "customers_Report").toString().trim();
+
+    const [wo, sr, inv, cust] = await Promise.all([
+      creatorGetReport(workOrdersReport, req.query || {}),
+      creatorGetReport(serviceRequestsReport, req.query || {}),
+      creatorGetReport(invoicesReport, req.query || {}),
+      creatorGetReport(customersReport, req.query || {})
+    ]);
+
+    const workOrders = Array.isArray(wo && wo.data) ? wo.data : [];
+    const serviceRequests = Array.isArray(sr && sr.data) ? sr.data : [];
+    const invoices = Array.isArray(inv && inv.data) ? inv.data : [];
+    const customers = Array.isArray(cust && cust.data) ? cust.data : [];
+
+    const syncErrorsCount = customers.filter((c) => String((c && c.sync_status) || "").toLowerCase() === "error").length;
+
+    return res.json({
+      ok: true,
+      workOrdersCount: workOrders.length,
+      openRequestsCount: serviceRequests.length,
+      pendingInvoicesCount: invoices.length,
+      syncErrorsCount
+    });
+  } catch (err) {
+    console.error("mobile-kpi-counts error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ ok: false, error: err.message || "Failed to fetch KPI counts." });
+  }
+});
+
 // ----------------------------
 // FlutterFlow wrapper endpoints
 // ----------------------------
