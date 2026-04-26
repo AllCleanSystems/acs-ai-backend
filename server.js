@@ -1432,9 +1432,19 @@ app.get("/mobile/work-orders", requireMobileJwtOrApiKey, async (req, res) => {
 
 app.get("/mobile/books/invoices", requireMobileJwtOrApiKey, async (req, res) => {
   try {
-    const orgId = (process.env.ZOHO_BOOKS_ORGANIZATION_ID || "").toString().trim();
+    const orgId = (
+      req.query.organization_id ||
+      req.query.org_id ||
+      process.env.ZOHO_BOOKS_ORGANIZATION_ID ||
+      ""
+    )
+      .toString()
+      .trim();
     if (!orgId) {
-      return res.status(500).json({ ok: false, error: "ZOHO_BOOKS_ORGANIZATION_ID not configured." });
+      return res.status(500).json({
+        ok: false,
+        error: "ZOHO_BOOKS_ORGANIZATION_ID not configured. Pass organization_id query param as temporary fallback."
+      });
     }
 
     const { customer_id, status, page, per_page } = req.query || {};
@@ -1454,9 +1464,19 @@ app.get("/mobile/books/invoices", requireMobileJwtOrApiKey, async (req, res) => 
 
 app.get("/mobile/books/customers", requireMobileJwtOrApiKey, async (req, res) => {
   try {
-    const orgId = (process.env.ZOHO_BOOKS_ORGANIZATION_ID || "").toString().trim();
+    const orgId = (
+      req.query.organization_id ||
+      req.query.org_id ||
+      process.env.ZOHO_BOOKS_ORGANIZATION_ID ||
+      ""
+    )
+      .toString()
+      .trim();
     if (!orgId) {
-      return res.status(500).json({ ok: false, error: "ZOHO_BOOKS_ORGANIZATION_ID not configured." });
+      return res.status(500).json({
+        ok: false,
+        error: "ZOHO_BOOKS_ORGANIZATION_ID not configured. Pass organization_id query param as temporary fallback."
+      });
     }
 
     const { page, per_page } = req.query || {};
@@ -1475,9 +1495,19 @@ app.get("/mobile/books/customers", requireMobileJwtOrApiKey, async (req, res) =>
 
 app.get("/mobile/books/estimates", requireMobileJwtOrApiKey, async (req, res) => {
   try {
-    const orgId = (process.env.ZOHO_BOOKS_ORGANIZATION_ID || "").toString().trim();
+    const orgId = (
+      req.query.organization_id ||
+      req.query.org_id ||
+      process.env.ZOHO_BOOKS_ORGANIZATION_ID ||
+      ""
+    )
+      .toString()
+      .trim();
     if (!orgId) {
-      return res.status(500).json({ ok: false, error: "ZOHO_BOOKS_ORGANIZATION_ID not configured." });
+      return res.status(500).json({
+        ok: false,
+        error: "ZOHO_BOOKS_ORGANIZATION_ID not configured. Pass organization_id query param as temporary fallback."
+      });
     }
 
     const { customer_id, status, page, per_page } = req.query || {};
