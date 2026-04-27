@@ -1430,16 +1430,77 @@ app.get("/mobile/work-orders", requireMobileJwtOrApiKey, async (req, res) => {
   }
 });
 
+function getBooksOrganizationIdFromReq(req) {
+  return (
+    req.query.organization_id ||
+    req.query.org_id ||
+    process.env.ZOHO_BOOKS_ORGANIZATION_ID ||
+    ""
+  )
+    .toString()
+    .trim();
+}
+
+function toFiniteNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function parseIsoDateOnly(value) {
+  const text = (value || "").toString().trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const date = new Date(`${text}T00:00:00Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function normalizeInvoiceStatus(status) {
+  return (status || "").toString().trim().toLowerCase();
+}
+
+function getDayDiffFromToday(dateValue) {
+  const target = parseIsoDateOnly(dateValue);
+  if (!target) return null;
+  const now = new Date();
+  const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const targetUtc = Date.UTC(target.getUTCFullYear(), target.getUTCMonth(), target.getUTCDate());
+  return Math.floor((targetUtc - todayUtc) / (1000 * 60 * 60 * 24));
+}
+
+async function fetchAllBooksInvoices(orgId, options = {}) {
+  const perPage = Math.max(1, Math.min(200, Number(options.perPage || 200)));
+  const maxPages = Math.max(1, Math.min(20, Number(options.maxPages || 5)));
+  const status = (options.status || "").toString().trim();
+  const customerId = (options.customerId || "").toString().trim();
+
+  const all = [];
+  let page = 1;
+  let hasMore = true;
+  while (hasMore && page <= maxPages) {
+    const data = await zohoServiceGet("books", "/invoices", {
+      organization_id: orgId,
+      per_page: perPage,
+      page,
+      status,
+      customer_id: customerId,
+      sort_column: "date",
+      sort_order: "D"
+    });
+    const pageItems = Array.isArray(data && data.invoices) ? data.invoices : [];
+    all.push(...pageItems);
+    const pageContext = data && data.page_context ? data.page_context : {};
+    hasMore = Boolean(pageContext.has_more_page);
+    page += 1;
+  }
+  return all;
+}
+
 app.get("/mobile/books/invoices", requireMobileJwtOrApiKey, async (req, res) => {
   try {
-    const orgId = (
-      req.query.organization_id ||
-      req.query.org_id ||
-      process.env.ZOHO_BOOKS_ORGANIZATION_ID ||
-      ""
-    )
-      .toString()
-      .trim();
+    const orgId = getBooksOrganizationIdFromReq(req);
     if (!orgId) {
       return res.status(500).json({
         ok: false,
@@ -1464,14 +1525,7 @@ app.get("/mobile/books/invoices", requireMobileJwtOrApiKey, async (req, res) => 
 
 app.get("/mobile/books/customers", requireMobileJwtOrApiKey, async (req, res) => {
   try {
-    const orgId = (
-      req.query.organization_id ||
-      req.query.org_id ||
-      process.env.ZOHO_BOOKS_ORGANIZATION_ID ||
-      ""
-    )
-      .toString()
-      .trim();
+    const orgId = getBooksOrganizationIdFromReq(req);
     if (!orgId) {
       return res.status(500).json({
         ok: false,
@@ -1495,14 +1549,7 @@ app.get("/mobile/books/customers", requireMobileJwtOrApiKey, async (req, res) =>
 
 app.get("/mobile/books/estimates", requireMobileJwtOrApiKey, async (req, res) => {
   try {
-    const orgId = (
-      req.query.organization_id ||
-      req.query.org_id ||
-      process.env.ZOHO_BOOKS_ORGANIZATION_ID ||
-      ""
-    )
-      .toString()
-      .trim();
+    const orgId = getBooksOrganizationIdFromReq(req);
     if (!orgId) {
       return res.status(500).json({
         ok: false,
@@ -1522,6 +1569,119 @@ app.get("/mobile/books/estimates", requireMobileJwtOrApiKey, async (req, res) =>
   } catch (err) {
     console.error("mobile-books-estimates error:", err);
     return res.status(500).json({ ok: false, error: err.message || "Failed to fetch Books estimates." });
+  }
+});
+
+app.get("/mobile/books/invoices/summary", requireMobileJwtOrApiKey, async (req, res) => {
+  try {
+    const orgId = getBooksOrganizationIdFromReq(req);
+    if (!orgId) {
+      return res.status(500).json({
+        ok: false,
+        error: "ZOHO_BOOKS_ORGANIZATION_ID not configured. Pass organization_id query param as temporary fallback."
+      });
+    }
+
+    const dueSoonDays = Math.max(1, Math.min(30, Number(req.query.due_soon_days || 7)));
+    const perPage = Math.max(1, Math.min(200, Number(req.query.per_page || 200)));
+    const maxPages = Math.max(1, Math.min(20, Number(req.query.max_pages || 5)));
+    const invoices = await fetchAllBooksInvoices(orgId, {
+      perPage,
+      maxPages,
+      status: req.query.status,
+      customerId: req.query.customer_id
+    });
+
+    let totalInvoiced = 0;
+    let totalOutstanding = 0;
+    let overdueBalance = 0;
+    let collectedAmount = 0;
+    let overdueCount = 0;
+    let paidCount = 0;
+    const statusBucketsMap = new Map();
+
+    const overdueTop = [];
+    const dueSoon = [];
+
+    for (const invoice of invoices) {
+      const total = toFiniteNumber(invoice && invoice.total);
+      const balance = Math.max(0, toFiniteNumber(invoice && invoice.balance));
+      const status = normalizeInvoiceStatus(invoice && invoice.status);
+
+      totalInvoiced += total;
+      totalOutstanding += balance;
+      collectedAmount += Math.max(0, total - balance);
+
+      const existing = statusBucketsMap.get(status) || { status, count: 0, total: 0, balance: 0 };
+      existing.count += 1;
+      existing.total += total;
+      existing.balance += balance;
+      statusBucketsMap.set(status, existing);
+
+      const dayDiff = getDayDiffFromToday(invoice && invoice.due_date);
+      if (status === "paid") paidCount += 1;
+
+      if (status === "overdue" || (dayDiff !== null && dayDiff < 0 && balance > 0)) {
+        overdueCount += 1;
+        overdueBalance += balance;
+        overdueTop.push(invoice);
+      } else if (dayDiff !== null && dayDiff >= 0 && dayDiff <= dueSoonDays && balance > 0) {
+        dueSoon.push(invoice);
+      }
+    }
+
+    overdueTop.sort((a, b) => toFiniteNumber(b && b.balance) - toFiniteNumber(a && a.balance));
+    dueSoon.sort((a, b) => {
+      const ad = getDayDiffFromToday(a && a.due_date);
+      const bd = getDayDiffFromToday(b && b.due_date);
+      if (ad === null && bd === null) return 0;
+      if (ad === null) return 1;
+      if (bd === null) return -1;
+      return ad - bd;
+    });
+
+    const statusBuckets = Array.from(statusBucketsMap.values())
+      .map((bucket) => ({
+        status: bucket.status || "unknown",
+        count: bucket.count,
+        total: Number(bucket.total.toFixed(2)),
+        balance: Number(bucket.balance.toFixed(2))
+      }))
+      .sort((a, b) => b.balance - a.balance);
+
+    const totalCount = invoices.length;
+    const openCount = totalCount - paidCount;
+
+    return res.json({
+      ok: true,
+      kpis: {
+        totalCount,
+        openCount,
+        paidCount,
+        overdueCount,
+        totalInvoiced: Number(totalInvoiced.toFixed(2)),
+        outstandingBalance: Number(totalOutstanding.toFixed(2)),
+        overdueBalance: Number(overdueBalance.toFixed(2)),
+        collectedAmount: Number(collectedAmount.toFixed(2)),
+        averageInvoiceValue: totalCount > 0 ? Number((totalInvoiced / totalCount).toFixed(2)) : 0
+      },
+      lists: {
+        overdueTop: overdueTop.slice(0, 10),
+        dueSoon: dueSoon.slice(0, 10),
+        recent: invoices.slice(0, 20)
+      },
+      statusBuckets,
+      meta: {
+        dueSoonDays,
+        perPage,
+        maxPages,
+        fetchedInvoices: totalCount,
+        generatedAt: new Date().toISOString()
+      }
+    });
+  } catch (err) {
+    console.error("mobile-books-invoices-summary error:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to build invoice summary." });
   }
 });
 
