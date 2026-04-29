@@ -659,6 +659,46 @@ async function creatorGetReport(reportLink, query = {}) {
   return data;
 }
 
+function mergeKnownIntake(base, patch) {
+  const out = { ...(base || {}) };
+  if (patch && typeof patch === "object") {
+    for (const key of Object.keys(patch)) {
+      const val = patch[key];
+      if (val !== undefined && val !== null && String(val).trim() !== "") {
+        out[key] = String(val).trim();
+      }
+    }
+  }
+  return out;
+}
+
+function requiredMissingForWebsiteIntake(intake) {
+  const missing = [];
+  if (!cleanString(intake.customer_name)) missing.push("customer_name");
+  if (!cleanString(intake.address)) missing.push("address");
+  if (!cleanString(intake.service_type)) missing.push("service_type");
+  if (!cleanString(intake.urgency)) missing.push("urgency");
+  if (!cleanString(intake.request_summary)) missing.push("request_summary");
+  if (!cleanString(intake.preferred_window)) missing.push("preferred_window");
+  if (!cleanString(intake.phone) && !cleanString(intake.email)) missing.push("contact");
+  return missing;
+}
+
+function parseJsonMaybeWrapped(text) {
+  if (!text || typeof text !== "string") return null;
+  try {
+    return JSON.parse(text);
+  } catch (e) {}
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    try {
+      return JSON.parse(text.slice(start, end + 1));
+    } catch (e) {}
+  }
+  return null;
+}
+
 async function creatorGetRecord(reportLink, recordId) {
   const accessToken = await getZohoAccessToken();
   const { owner, appLink } = creatorOwnerAndApp();
@@ -2430,6 +2470,138 @@ app.get("/ui/money-queue", requireFlutterFlowApiKey, async (req, res) => {
   } catch (err) {
     console.error("ui-money-queue error:", err);
     return res.status(500).json({ ok: false, error: err.message || "Server error." });
+  }
+});
+
+// Wix-style single endpoint compatibility for website AI chat + intake handoff.
+// Request shape:
+// { message, chatSessionId, knownIntake, intakeAlreadySubmitted, chatTranscript }
+// Response shape:
+// { ok, reply, intake, intakeCreated, endChat, missing, error? }
+app.post("/api/website-chat-handoff", async (req, res) => {
+  try {
+    if (!openai) {
+      return res.status(500).json({ ok: false, error: "OPENAI_API_KEY is not configured." });
+    }
+
+    const message = (req.body.message || "").toString().trim();
+    if (!message) {
+      return res.status(400).json({ ok: false, error: "Message is required." });
+    }
+
+    const chatSessionId = (req.body.chatSessionId || "").toString().trim();
+    const chatTranscript = (req.body.chatTranscript || "").toString();
+    const knownIntake = req.body.knownIntake && typeof req.body.knownIntake === "object" ? req.body.knownIntake : {};
+    const intakeAlreadySubmitted = Boolean(req.body.intakeAlreadySubmitted);
+
+    const instructionOverride = (process.env.WEBSITE_AGENT_INSTRUCTIONS || "").toString().trim();
+    const instructions = instructionOverride || [
+      "You are All Clean Solutions (ACS) website assistant.",
+      "Ask one concise question at a time.",
+      "Do not ask for fields already present in KNOWN_INTAKE.",
+      "Return ONLY valid JSON and no extra text.",
+      "JSON schema:",
+      "{",
+      '  "reply":"string",',
+      '  "create_intake":true/false,',
+      '  "intake_patch":{',
+      '    "customer_name":"", "phone":"", "email":"", "address":"",',
+      '    "service_type":"", "urgency":"", "request_summary":"", "preferred_window":""',
+      "  },",
+      '  "end_chat":true/false',
+      "}"
+    ].join("\n");
+
+    const inputText =
+      `KNOWN_INTAKE:\n${JSON.stringify(knownIntake)}\n` +
+      `intakeAlreadySubmitted: ${intakeAlreadySubmitted ? "true" : "false"}\n\n` +
+      `Customer: ${message}`;
+
+    const ai = await openai.responses.create({
+      model: OPENAI_MODEL,
+      input: [
+        { role: "system", content: instructions },
+        { role: "user", content: inputText }
+      ],
+      max_output_tokens: 380
+    });
+
+    const rawText = responseText(ai);
+    const parsed = parseJsonMaybeWrapped(rawText);
+    if (!parsed || typeof parsed !== "object") {
+      return res.json({
+        ok: true,
+        reply: rawText || "Thanks. Can you share your name and best contact number?",
+        intake: knownIntake,
+        intakeCreated: false,
+        endChat: false
+      });
+    }
+
+    const intakePatch = parsed.intake_patch && typeof parsed.intake_patch === "object" ? parsed.intake_patch : {};
+    const merged = mergeKnownIntake(knownIntake, intakePatch);
+    merged.channel = "Website Chat";
+    merged.intent = merged.intent || "New Service Request";
+    merged.chat_session_id = chatSessionId || merged.chat_session_id || "";
+    merged.service_type = mapServiceType(merged.service_type);
+    merged.urgency = mapUrgency(merged.urgency);
+
+    const missing = requiredMissingForWebsiteIntake(merged);
+
+    if (intakeAlreadySubmitted) {
+      return res.json({
+        ok: true,
+        reply: cleanString(parsed.reply) || "Got it. Anything else to add?",
+        intake: merged,
+        intakeCreated: false,
+        endChat: false,
+        missing
+      });
+    }
+
+    if (missing.length > 0) {
+      return res.json({
+        ok: true,
+        reply: cleanString(parsed.reply) || `Quick question: what is your ${missing[0].replace("_", " ")}?`,
+        intake: merged,
+        intakeCreated: false,
+        endChat: false,
+        missing
+      });
+    }
+
+    if (!parsed.create_intake) {
+      return res.json({
+        ok: true,
+        reply: cleanString(parsed.reply) || "Please confirm you want me to submit this request.",
+        intake: merged,
+        intakeCreated: false,
+        endChat: false,
+        missing: []
+      });
+    }
+
+    if (chatTranscript) {
+      const clipped = chatTranscript.length > 2500 ? chatTranscript.slice(chatTranscript.length - 2500) : chatTranscript;
+      merged.request_summary = `${cleanString(merged.request_summary)}\n\nChat Transcript:\n${clipped}`.trim();
+    }
+
+    const zoho = await createZohoAiIntakeRecord(merged);
+    return res.json({
+      ok: true,
+      reply: cleanString(parsed.reply) || "Perfect. I submitted your request.",
+      intake: merged,
+      intakeCreated: true,
+      endChat: Boolean(parsed.end_chat) || true,
+      missing: [],
+      zoho
+    });
+  } catch (error) {
+    console.error("website-chat-handoff error:", error);
+    return res.status(500).json({
+      ok: false,
+      error: error && error.message ? error.message : "Server error."
+    });
   }
 });
 
